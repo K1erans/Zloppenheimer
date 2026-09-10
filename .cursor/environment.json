@@ -1,0 +1,11 @@
+{
+  "name": "Zed",
+  "install": ".cursor/install.sh",
+  "terminals": [
+    {
+      "name": "Xvfb",
+      "command": "Xvfb :99 -screen 0 1600x1000x24",
+      "description": "Virtual X display on :99 for running the Zed GUI headlessly. Run the editor with DISPLAY=:99 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json ZED_ALLOW_EMULATED_GPU=1 cargo run -p zed"
+    }
+  ]
+}
