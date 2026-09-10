@@ -38,6 +38,14 @@ const DOT_RED: u32 = 0xff5f57;
 const DOT_YELLOW: u32 = 0xfebc2e;
 const DOT_GREEN: u32 = 0x28c840;
 
+// Zloppenheimer logo mark: four staggered bars on a rounded tile.
+const LOGO_BG: u32 = 0x0f1218;
+const LOGO_EDGE: u32 = 0x242a36;
+const LOGO_WHITE: u32 = 0xeef2f7;
+const LOGO_PURPLE: u32 = 0xa181d1;
+const LOGO_BLUE: u32 = 0x3d84ed;
+const LOGO_GREEN: u32 = 0x7cae5f;
+
 /// The signed-in Zed account rendered in the bottom bar.
 #[derive(Clone)]
 struct ZedAccount {
@@ -114,6 +122,46 @@ fn icon(path: &'static str, size_px: f32, color: u32) -> impl IntoElement {
         .text_color(rgb(color))
 }
 
+/// The Zloppenheimer logo, drawn as a vector so it stays crisp at any size:
+/// four staggered rounded bars (off-white, purple, blue, green) on a rounded
+/// tile. Proportions are expressed as fractions of `size` to match the brand
+/// artwork.
+fn logo_tile(size: f32) -> impl IntoElement {
+    let bar = |width_fraction: f32, color: u32, align_end: bool| {
+        div()
+            .flex()
+            .w_full()
+            .h(px(size * 0.061))
+            .when(align_end, |row| row.justify_end())
+            .child(
+                div()
+                    .w(px(size * width_fraction))
+                    .h_full()
+                    .rounded_full()
+                    .bg(rgb(color)),
+            )
+    };
+
+    div()
+        .flex_none()
+        .w(px(size))
+        .h(px(size))
+        .rounded(px(size * 0.215))
+        .bg(rgb(LOGO_BG))
+        .border_1()
+        .border_color(rgb(LOGO_EDGE))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(size * 0.052))
+        .pl(px(size * 0.205))
+        .pr(px(size * 0.21))
+        .child(bar(0.585, LOGO_WHITE, false))
+        .child(bar(0.435, LOGO_PURPLE, true))
+        .child(bar(0.283, LOGO_BLUE, false))
+        .child(bar(0.585, LOGO_GREEN, false))
+}
+
 fn title_bar() -> impl IntoElement {
     div()
         .flex()
@@ -150,21 +198,7 @@ fn brand() -> impl IntoElement {
         .flex()
         .items_center()
         .gap_2()
-        .child(
-            div()
-                .size_5()
-                .rounded_md()
-                .bg(rgb(ELEV_BG))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT))
-                .child("Z"),
-        )
+        .child(logo_tile(26.))
         .child(
             div()
                 .font_weight(FontWeight::SEMIBOLD)
