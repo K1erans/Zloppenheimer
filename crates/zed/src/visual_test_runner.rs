@@ -103,7 +103,7 @@ use {
     feature_flags::FeatureFlagAppExt as _,
     git_ui::project_diff::ProjectDiff,
     gpui::{
-        App, AppContext as _, Bounds, Entity, KeyBinding, Modifiers, VisualTestAppContext,
+        App, AppContext as _, Bounds, Entity, Focusable as _, Modifiers, VisualTestAppContext,
         WindowBounds, WindowHandle, WindowOptions, point, px, size,
     },
     image::RgbaImage,
@@ -226,12 +226,13 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         settings_ui::init(cx);
 
         // Load default keymaps so tooltips can show keybindings like "f9" for ToggleBreakpoint
-        // We load a minimal set of editor keybindings needed for visual tests
-        cx.bind_keys([KeyBinding::new(
-            "f9",
-            editor::actions::ToggleBreakpoint,
-            Some("Editor"),
-        )]);
+        match settings::KeymapFile::load_asset_allow_partial_failure(
+            settings::DEFAULT_KEYMAP_PATH,
+            cx,
+        ) {
+            Ok(bindings) => cx.bind_keys(bindings),
+            Err(error) => log::error!("Failed to load default keymap: {error}"),
+        }
 
         // Disable agent notifications during visual tests to avoid popup windows
         agent_settings::AgentSettings::override_global(
@@ -1294,6 +1295,26 @@ fn run_breakpoint_hover_visual_tests(
     }
 }
 
+#[cfg(target_os = "macos")]
+fn update_embedded_settings<R>(
+    workspace_window: WindowHandle<MultiWorkspace>,
+    cx: &mut VisualTestAppContext,
+    callback: impl FnOnce(
+        &mut SettingsWindow,
+        &mut gpui::Window,
+        &mut gpui::Context<SettingsWindow>,
+    ) -> R,
+) -> Result<R> {
+    workspace_window
+        .update(cx, |multi_workspace, window, cx| {
+            let settings = multi_workspace
+                .app_overlay()
+                .and_then(|overlay| overlay.downcast::<SettingsWindow>().ok())?;
+            Some(settings.update(cx, |settings, cx| callback(settings, window, cx)))
+        })?
+        .context("Settings overlay not found")
+}
+
 /// Runs visual tests for the settings UI sub-page auto-open feature.
 ///
 /// This test verifies that when opening settings via OpenSettingsAt with a path
@@ -1309,7 +1330,7 @@ fn run_settings_ui_subpage_visual_tests(
     update_baseline: bool,
 ) -> Result<TestResult> {
     // Create a workspace window for dispatching actions
-    let window_size = size(px(1280.0), px(800.0));
+    let window_size = size(px(1440.0), px(900.0));
     let bounds = Bounds {
         origin: point(px(0.0), px(0.0)),
         size: window_size,
@@ -1350,179 +1371,159 @@ fn run_settings_ui_subpage_visual_tests(
         })
         .context("Failed to open workspace window")?;
 
-    cx.run_until_parked();
+    let result = (|| -> Result<TestResult> {
+        cx.run_until_parked();
 
-    workspace_window.update(cx, |_, window, cx| {
-        window.dispatch_action(Box::new(zed_actions::OpenSettings), cx);
-    })?;
-    cx.run_until_parked();
-    let general_settings_window = cx
-        .update(|cx| {
-            cx.windows()
-                .into_iter()
-                .find_map(|window| window.downcast::<SettingsWindow>())
-        })
-        .context("General settings window not found")?;
-    cx.run_until_parked();
-    let output_dir = std::env::var("VISUAL_TEST_OUTPUT_DIR")
-        .unwrap_or_else(|_| "target/visual_tests".to_string());
-    std::fs::create_dir_all(&output_dir)?;
-    cx.capture_screenshot(general_settings_window.into())?
-        .save(PathBuf::from(&output_dir).join("paper_settings_general.png"))?;
-    for (page, filename) in [
-        ("Profile", "paper_settings_profile.png"),
-        ("AI", "paper_settings_ai.png"),
-        ("Keymap", "paper_settings_keymap.png"),
-    ] {
+        workspace_window.update(cx, |_, window, cx| {
+            window.dispatch_action(Box::new(zed_actions::OpenSettings), cx);
+        })?;
+        cx.run_until_parked();
+        let output_dir = std::env::var("VISUAL_TEST_OUTPUT_DIR")
+            .unwrap_or_else(|_| "target/visual_tests".to_string());
+        std::fs::create_dir_all(&output_dir)?;
+        cx.capture_screenshot(workspace_window.into())?
+            .save(PathBuf::from(&output_dir).join("paper_settings_general.png"))?;
+        for (page, filename) in [
+            ("Profile", "paper_settings_profile.png"),
+            ("AI", "paper_settings_ai.png"),
+            ("Keymap", "paper_settings_keymap.png"),
+        ] {
+            workspace_window.update(cx, |_, window, cx| {
+                window.dispatch_action(
+                    Box::new(zed_actions::OpenSettingsPage {
+                        page: page.to_string(),
+                        target: None,
+                    }),
+                    cx,
+                );
+            })?;
+            cx.run_until_parked();
+            cx.capture_screenshot(workspace_window.into())?
+                .save(PathBuf::from(&output_dir).join(filename))?;
+        }
         workspace_window.update(cx, |_, window, cx| {
             window.dispatch_action(
                 Box::new(zed_actions::OpenSettingsPage {
-                    page: page.to_string(),
+                    page: "AI".to_string(),
                     target: None,
                 }),
                 cx,
             );
         })?;
         cx.run_until_parked();
-        cx.capture_screenshot(general_settings_window.into())?
-            .save(PathBuf::from(&output_dir).join(filename))?;
-    }
-    workspace_window.update(cx, |_, window, cx| {
-        window.dispatch_action(
-            Box::new(zed_actions::OpenSettingsPage {
-                page: "AI".to_string(),
-                target: None,
-            }),
+        update_embedded_settings(workspace_window, cx, |settings, window, cx| {
+            settings.navigate_to_sub_page("model_connections", window, cx);
+        })?;
+        cx.run_until_parked();
+        cx.capture_screenshot(workspace_window.into())?
+            .save(PathBuf::from(&output_dir).join("paper_settings_connections.png"))?;
+        update_embedded_settings(workspace_window, cx, |settings, window, cx| {
+            settings.open_add_connection_menu(window, cx);
+        })?;
+        cx.run_until_parked();
+        cx.capture_screenshot(workspace_window.into())?
+            .save(PathBuf::from(&output_dir).join("paper_settings_add_connection.png"))?;
+        update_embedded_settings(workspace_window, cx, |settings, _, cx| {
+            settings.hide_add_connection_menu(cx);
+        })?;
+        update_embedded_settings(workspace_window, cx, |settings, window, cx| {
+            settings.add_custom_agent(window, cx)
+        })?;
+        cx.run_until_parked();
+        cx.capture_screenshot(workspace_window.into())?
+            .save(PathBuf::from(&output_dir).join("paper_settings_custom_agent.png"))?;
+        workspace_window.update(cx, |multi_workspace, _, cx| {
+            multi_workspace.set_app_overlay(None, cx);
+        })?;
+        cx.run_until_parked();
+
+        // Test 1: Open settings with a path that maps to multiple items (e.g., "agent")
+        // This should NOT auto-open a sub-page since multiple items match
+        workspace_window
+            .update(cx, |_workspace, window, cx| {
+                window.dispatch_action(
+                    Box::new(OpenSettingsAt {
+                        path: "agent".to_string(),
+                        target: None,
+                    }),
+                    cx,
+                );
+            })
+            .context("Failed to dispatch OpenSettingsAt for multiple items")?;
+
+        cx.run_until_parked();
+
+        cx.update_window(workspace_window.into(), |_, window, _cx| {
+            window.refresh();
+        })?;
+        cx.run_until_parked();
+
+        let test1_result = run_visual_test(
+            "settings_ui_no_auto_open",
+            workspace_window.into(),
             cx,
-        );
-    })?;
-    cx.run_until_parked();
-    general_settings_window.update(cx, |settings, window, cx| {
-        settings.navigate_to_sub_page("model_connections", window, cx);
-    })?;
-    cx.run_until_parked();
-    cx.capture_screenshot(general_settings_window.into())?
-        .save(PathBuf::from(&output_dir).join("paper_settings_connections.png"))?;
-    general_settings_window.update(cx, |settings, window, cx| {
-        settings.add_custom_agent(window, cx)
-    })?;
-    cx.run_until_parked();
-    cx.capture_screenshot(general_settings_window.into())?
-        .save(PathBuf::from(&output_dir).join("paper_settings_custom_agent.png"))?;
-    general_settings_window.update(cx, |_, window, _| window.remove_window())?;
-    cx.run_until_parked();
+            update_baseline,
+        )?;
 
-    // Test 1: Open settings with a path that maps to multiple items (e.g., "agent")
-    // This should NOT auto-open a sub-page since multiple items match
-    workspace_window
-        .update(cx, |_workspace, window, cx| {
-            window.dispatch_action(
-                Box::new(OpenSettingsAt {
-                    path: "agent".to_string(),
-                    target: None,
-                }),
-                cx,
-            );
+        workspace_window
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace.set_app_overlay(None, cx);
+            })
+            .log_err();
+        cx.run_until_parked();
+
+        // Test 2: Open settings with a path that maps to a single SubPageLink
+        // "edit_predictions.providers" maps to the "Configure Providers" SubPageLink
+        // This should auto-open the sub-page
+        workspace_window
+            .update(cx, |_workspace, window, cx| {
+                window.dispatch_action(
+                    Box::new(OpenSettingsAt {
+                        path: "edit_predictions.providers".to_string(),
+                        target: None,
+                    }),
+                    cx,
+                );
+            })
+            .context("Failed to dispatch OpenSettingsAt for single SubPageLink")?;
+
+        cx.run_until_parked();
+
+        cx.update_window(workspace_window.into(), |_, window, _cx| {
+            window.refresh();
+        })?;
+        cx.run_until_parked();
+
+        let test2_result = run_visual_test(
+            "settings_ui_subpage_auto_open",
+            workspace_window.into(),
+            cx,
+            update_baseline,
+        )?;
+
+        match (&test1_result, &test2_result) {
+            (TestResult::Passed, TestResult::Passed) => Ok(TestResult::Passed),
+            (TestResult::BaselineUpdated(p), _) | (_, TestResult::BaselineUpdated(p)) => {
+                Ok(TestResult::BaselineUpdated(p.clone()))
+            }
+        }
+    })();
+
+    let remaining_windows = cx.update(|cx| cx.windows());
+    for window in remaining_windows {
+        cx.update_window(window, |_, window, _cx| {
+            window.remove_window();
         })
-        .context("Failed to dispatch OpenSettingsAt for multiple items")?;
-
+        .log_err();
+    }
     cx.run_until_parked();
 
-    // Find the settings window
-    let settings_window_1 = cx
-        .update(|cx| {
-            cx.windows()
-                .into_iter()
-                .find_map(|window| window.downcast::<SettingsWindow>())
-        })
-        .context("Settings window not found")?;
-
-    // Refresh and capture screenshot
-    cx.update_window(settings_window_1.into(), |_, window, _cx| {
-        window.refresh();
-    })?;
-    cx.run_until_parked();
-
-    let test1_result = run_visual_test(
-        "settings_ui_no_auto_open",
-        settings_window_1.into(),
-        cx,
-        update_baseline,
-    )?;
-
-    // Close the settings window
-    cx.update_window(settings_window_1.into(), |_, window, _cx| {
-        window.remove_window();
-    })
-    .log_err();
-    cx.run_until_parked();
-
-    // Test 2: Open settings with a path that maps to a single SubPageLink
-    // "edit_predictions.providers" maps to the "Configure Providers" SubPageLink
-    // This should auto-open the sub-page
-    workspace_window
-        .update(cx, |_workspace, window, cx| {
-            window.dispatch_action(
-                Box::new(OpenSettingsAt {
-                    path: "edit_predictions.providers".to_string(),
-                    target: None,
-                }),
-                cx,
-            );
-        })
-        .context("Failed to dispatch OpenSettingsAt for single SubPageLink")?;
-
-    cx.run_until_parked();
-
-    // Find the new settings window
-    let settings_window_2 = cx
-        .update(|cx| {
-            cx.windows()
-                .into_iter()
-                .find_map(|window| window.downcast::<SettingsWindow>())
-        })
-        .context("Settings window not found for sub-page test")?;
-
-    // Refresh and capture screenshot
-    cx.update_window(settings_window_2.into(), |_, window, _cx| {
-        window.refresh();
-    })?;
-    cx.run_until_parked();
-
-    let test2_result = run_visual_test(
-        "settings_ui_subpage_auto_open",
-        settings_window_2.into(),
-        cx,
-        update_baseline,
-    )?;
-
-    // Clean up: close the settings window
-    cx.update_window(settings_window_2.into(), |_, window, _cx| {
-        window.remove_window();
-    })
-    .log_err();
-    cx.run_until_parked();
-
-    // Clean up: close the workspace window
-    cx.update_window(workspace_window.into(), |_, window, _cx| {
-        window.remove_window();
-    })
-    .log_err();
-    cx.run_until_parked();
-
-    // Give background tasks time to finish
     for _ in 0..5 {
         cx.advance_clock(Duration::from_millis(100));
         cx.run_until_parked();
     }
 
-    // Return combined result
-    match (&test1_result, &test2_result) {
-        (TestResult::Passed, TestResult::Passed) => Ok(TestResult::Passed),
-        (TestResult::BaselineUpdated(p), _) | (_, TestResult::BaselineUpdated(p)) => {
-            Ok(TestResult::BaselineUpdated(p.clone()))
-        }
-    }
+    result
 }
 
 /// Runs visual tests for the diff review button in git diff views.
@@ -2085,6 +2086,30 @@ fn run_agent_thread_view_test(
     )?;
     let image_path = project_path.join("test-image.png");
     std::fs::write(&image_path, EMBEDDED_TEST_IMAGE)?;
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(&project_path)
+        .output()?;
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&project_path)
+        .output()?;
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(&project_path)
+        .output()?;
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&project_path)
+        .output()?;
+    std::process::Command::new("git")
+        .args(["commit", "-m", "Initial commit"])
+        .current_dir(&project_path)
+        .output()?;
+    std::fs::write(
+        project_path.join("search.js"),
+        "function findItems(items, query) {\n  return items;\n}\n",
+    )?;
 
     // Create a project with the test image
     let project = cx.update(|cx| {
@@ -2241,10 +2266,17 @@ fn run_agent_thread_view_test(
     let git_panel = cx
         .foreground_executor
         .block_test(git_ui::git_panel::GitPanel::load(
+            weak_workspace.clone(),
+            async_window_cx.clone(),
+        ))
+        .context("Failed to load changes panel")?;
+    let terminal_panel = cx
+        .foreground_executor
+        .block_test(terminal_view::terminal_panel::TerminalPanel::load(
             weak_workspace,
             async_window_cx,
         ))
-        .context("Failed to load changes panel")?;
+        .context("Failed to load terminal panel")?;
     cx.background_executor.forbid_parking();
 
     workspace_window.update(cx, |multi_workspace, window, cx| {
@@ -2254,6 +2286,7 @@ fn run_agent_thread_view_test(
             .update(cx, |workspace, cx| {
                 workspace.add_panel(project_panel.clone(), window, cx);
                 workspace.add_panel(git_panel.clone(), window, cx);
+                workspace.add_panel(terminal_panel.clone(), window, cx);
                 workspace.add_panel(panel.clone(), window, cx);
                 workspace.open_panel::<AgentPanel>(window, cx);
             });
@@ -2352,8 +2385,26 @@ fn run_agent_thread_view_test(
     cx.run_until_parked();
     cx.capture_screenshot(workspace_window.into())?
         .save(PathBuf::from(&output_dir).join("paper_front_page.png"))?;
+    workspace_window.update(cx, |_, window, cx| {
+        sidebar.focus_handle(cx).focus(window, cx);
+        window.dispatch_action(Box::new(zed_actions::OpenRecent::default()), cx);
+    })?;
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_project_switcher.png"))?;
+    workspace_window.update(cx, |_, window, cx| {
+        window.dispatch_action(Box::new(menu::Cancel), cx);
+    })?;
+    cx.run_until_parked();
 
     workspace_window.update(cx, |_, window, cx| {
+        if let Some(active_thread) = thread_view.read(cx).active_thread().cloned() {
+            active_thread
+                .read(cx)
+                .message_editor
+                .focus_handle(cx)
+                .focus(window, cx);
+        }
         window.dispatch_action(Box::new(zed_actions::agent::ToggleModelSelector), cx);
     })?;
     cx.run_until_parked();
@@ -2391,9 +2442,47 @@ fn run_agent_thread_view_test(
     cx.background_executor.allow_parking();
     cx.foreground_executor.block_test(open_file)?;
     cx.background_executor.forbid_parking();
+    workspace_window.update(cx, |multi_workspace, window, cx| {
+        let pane = multi_workspace.workspace().read(cx).active_pane().clone();
+        pane.update(cx, |pane, cx| {
+            pane.toolbar().update(cx, |toolbar, cx| {
+                let breadcrumbs = cx.new(|_| breadcrumbs::Breadcrumbs::new());
+                toolbar.add_item(breadcrumbs, window, cx);
+            });
+        });
+    })?;
     cx.run_until_parked();
     cx.capture_screenshot(workspace_window.into())?
         .save(PathBuf::from(&output_dir).join("paper_file_editor.png"))?;
+    workspace_window.update(cx, |multi_workspace, window, cx| {
+        multi_workspace
+            .workspace()
+            .clone()
+            .update(cx, |workspace, cx| {
+                workspace.open_panel::<git_ui::git_panel::GitPanel>(window, cx);
+            });
+    })?;
+    // Git status is computed by real git processes, so give them wall-clock time.
+    cx.background_executor.allow_parking();
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(100));
+        cx.run_until_parked();
+    }
+    cx.background_executor.forbid_parking();
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_git_changes.png"))?;
+    workspace_window.update(cx, |multi_workspace, window, cx| {
+        multi_workspace
+            .workspace()
+            .clone()
+            .update(cx, |workspace, cx| {
+                workspace.open_panel::<terminal_view::terminal_panel::TerminalPanel>(window, cx);
+            });
+    })?;
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_terminal.png"))?;
     workspace_window.update(cx, |multi_workspace, window, cx| {
         multi_workspace
             .workspace()
@@ -2470,8 +2559,65 @@ fn run_agent_thread_view_test(
         });
     })?;
     cx.run_until_parked();
-    let session_id = cx.read(|cx| thread.read(cx).session_id().clone());
-    connection.end_turn(session_id, acp::StopReason::MaxTokens);
+    cx.update(|cx| {
+        let path = project::ProjectPath::from((
+            worktree.read(cx).id(),
+            Arc::<util::rel_path::RelPath>::from(util::rel_path::rel_path("README.md")),
+        ));
+        let Some(buffer) = project.read(cx).get_open_buffer(&path, cx) else {
+            return;
+        };
+        thread.update(cx, |thread, cx| {
+            thread
+                .action_log()
+                .update(cx, |log, cx| log.buffer_read(buffer.clone(), cx));
+        });
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(0..0, "working note\n")], None, cx);
+        });
+        thread.update(cx, |thread, cx| {
+            thread
+                .action_log()
+                .update(cx, |log, cx| log.buffer_edited(buffer, cx));
+        });
+    });
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_conversation_working.png"))?;
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_conversation_working_variant.png"))?;
+    workspace_window.update(cx, |_, window, cx| {
+        window.dispatch_action(Box::new(agent_ui::OpenAgentDiff), cx);
+    })?;
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_agent_split_diff.png"))?;
+    workspace_window.update(cx, |multi_workspace, window, cx| {
+        multi_workspace
+            .workspace()
+            .clone()
+            .update(cx, |workspace, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            });
+    })?;
+    cx.run_until_parked();
+    let (session_id, has_pending_turn) = cx.read(|cx| {
+        let thread = thread.read(cx);
+        (
+            thread.session_id().clone(),
+            thread.status() != acp_thread::ThreadStatus::Idle,
+        )
+    });
+    // The stub only tracks a turn once its prompt has started, which can lag
+    // behind the thread reporting that it is generating.
+    let ended_turn = has_pending_turn
+        && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            connection.end_turn(session_id, acp::StopReason::MaxTokens);
+        }))
+        .is_ok();
+    if !ended_turn {
+        log::warn!("Could not end the follow-up turn, so the failed-turn capture shows it running");
+    }
     cx.run_until_parked();
     cx.capture_screenshot(workspace_window.into())?
         .save(PathBuf::from(&output_dir).join("paper_conversation_error.png"))?;
@@ -2571,6 +2717,7 @@ fn run_agent_thread_view_test(
     drop(panel);
     drop(project_panel);
     drop(git_panel);
+    drop(terminal_panel);
 
     // Run until all cleanup tasks complete
     cx.run_until_parked();
@@ -2692,24 +2839,14 @@ fn run_tool_permissions_visual_tests(
         cx.run_until_parked();
     }
 
-    // Find the settings window - it should be the newest window (last in the list)
-    let all_windows = cx.update(|cx| cx.windows());
-    let settings_window = all_windows.last().copied().context("No windows found")?;
-
     let output_dir = std::env::var("VISUAL_TEST_OUTPUT_DIR")
         .unwrap_or_else(|_| "target/visual_tests".to_string());
     std::fs::create_dir_all(&output_dir).log_err();
 
-    // Navigate to the tool permissions sub-page using the public API
-    let settings_window_handle = settings_window
-        .downcast::<settings_ui::SettingsWindow>()
-        .context("Failed to downcast to SettingsWindow")?;
-
-    settings_window_handle
-        .update(cx, |settings_window, window, cx| {
-            settings_window.navigate_to_sub_page("agent.tool_permissions", window, cx);
-        })
-        .context("Failed to navigate to tool permissions sub-page")?;
+    update_embedded_settings(workspace_window, cx, |settings_window, window, cx| {
+        settings_window.navigate_to_sub_page("agent.tool_permissions", window, cx);
+    })
+    .context("Failed to navigate to tool permissions sub-page")?;
 
     cx.run_until_parked();
 
@@ -2720,19 +2857,18 @@ fn run_tool_permissions_visual_tests(
     }
 
     // Now navigate into a specific tool (Terminal) to show the tool config page
-    settings_window_handle
-        .update(cx, |settings_window, window, cx| {
-            settings_window.push_dynamic_sub_page(
-                "Terminal",
-                "Configure Tool Rules",
-                None,
-                true,
-                settings_ui::pages::render_terminal_tool_config,
-                window,
-                cx,
-            );
-        })
-        .context("Failed to navigate to Terminal tool config")?;
+    update_embedded_settings(workspace_window, cx, |settings_window, window, cx| {
+        settings_window.push_dynamic_sub_page(
+            "Terminal",
+            "Configure Tool Rules",
+            None,
+            true,
+            settings_ui::pages::render_terminal_tool_config,
+            window,
+            cx,
+        );
+    })
+    .context("Failed to navigate to Terminal tool config")?;
 
     cx.run_until_parked();
 
@@ -2743,13 +2879,13 @@ fn run_tool_permissions_visual_tests(
     }
 
     // Refresh and redraw so the "Test Your Rules" input is present
-    cx.update_window(settings_window, |_, window, cx| {
+    cx.update_window(workspace_window.into(), |_, window, cx| {
         window.draw(cx).clear(cx);
     })
     .log_err();
     cx.run_until_parked();
 
-    cx.update_window(settings_window, |_, window, _cx| {
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
         window.refresh();
     })
     .log_err();
@@ -2757,13 +2893,13 @@ fn run_tool_permissions_visual_tests(
 
     // Focus the first tab stop in the window (the "Test Your Rules" editor
     // has tab_index(0) and tab_stop(true)) and type "hi" into it.
-    cx.update_window(settings_window, |_, window, cx| {
+    cx.update_window(workspace_window.into(), |_, window, cx| {
         window.focus_next(cx);
     })
     .log_err();
     cx.run_until_parked();
 
-    cx.simulate_input(settings_window, "hi");
+    cx.simulate_input(workspace_window.into(), "hi");
 
     // Let the UI update with the matched patterns
     for _ in 0..5 {
@@ -2772,13 +2908,13 @@ fn run_tool_permissions_visual_tests(
     }
 
     // Refresh and redraw
-    cx.update_window(settings_window, |_, window, cx| {
+    cx.update_window(workspace_window.into(), |_, window, cx| {
         window.draw(cx).clear(cx);
     })
     .log_err();
     cx.run_until_parked();
 
-    cx.update_window(settings_window, |_, window, _cx| {
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
         window.refresh();
     })
     .log_err();
@@ -2788,7 +2924,7 @@ fn run_tool_permissions_visual_tests(
     let tool_config_output_path =
         PathBuf::from(&output_dir).join("tool_permissions_test_rules.png");
 
-    if let Ok(screenshot) = cx.capture_screenshot(settings_window) {
+    if let Ok(screenshot) = cx.capture_screenshot(workspace_window.into()) {
         screenshot.save(&tool_config_output_path).log_err();
         println!(
             "Screenshot (test rules) saved to: {}",
@@ -2796,13 +2932,6 @@ fn run_tool_permissions_visual_tests(
         );
     }
 
-    // Clean up - close the settings window
-    cx.update_window(settings_window, |_, window, _cx| {
-        window.remove_window();
-    })
-    .log_err();
-
-    // Close the workspace window
     cx.update_window(workspace_window.into(), |_, window, _cx| {
         window.remove_window();
     })

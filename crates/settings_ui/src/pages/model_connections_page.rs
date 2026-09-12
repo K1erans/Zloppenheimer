@@ -81,7 +81,7 @@ pub(crate) fn render_model_connections_page(
             if disabled_servers.contains(&id.0.to_string()) {
                 "Disabled"
             } else {
-                "ACP agent installed"
+                "Account connected"
             },
             selected.as_ref() == Some(&key),
             Some((id.clone(), !disabled_servers.contains(&id.0.to_string()))),
@@ -113,7 +113,7 @@ pub(crate) fn render_model_connections_page(
         .min_w_0()
         .p(px(24.))
         .gap(px(20.))
-        .bg(gpui::rgb(0x232530));
+        .bg(cx.theme().colors().background);
     if let Some(key) = selected.as_deref() {
         if let Some(id) = key.strip_prefix("provider:") {
             if let Some(provider) = providers
@@ -133,54 +133,156 @@ pub(crate) fn render_model_connections_page(
             if let Some((_, name, source)) = agents.iter().find(|(agent_id, _, _)| *agent_id == id)
             {
                 let existing = super::external_agents_page::custom_agent_settings(&id, cx);
-                detail = detail.child(
-                    h_flex()
-                        .justify_between()
-                        .child(text(name.clone(), 18., 22., 0xE0DCE9))
-                        .child(text(ui::localized("Installed", cx), 11., 14., 0xA3A7B9)),
-                );
-                if let Some(settings::CustomAgentServerSettings::Custom {
-                    path, args, env, ..
-                }) = &existing
-                {
-                    detail = detail
-                        .child(group(vec![property(
+                let connected = !disabled_servers.contains(&id.0.to_string());
+                let (binary_path, home_directory, launch_arguments) = match &existing {
+                    Some(settings::CustomAgentServerSettings::Custom {
+                        path,
+                        working_directory,
+                        args,
+                        ..
+                    }) => (
+                        path.to_string_lossy().into_owned(),
+                        working_directory
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        args.join(" "),
+                    ),
+                    _ => (id.0.to_string(), String::new(), String::new()),
+                };
+                let edit_id = id.clone();
+                let add_variable_id = id.clone();
+                detail = detail
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .child(text(name.clone(), 18., 22., cx.theme().colors().text))
+                            .child(text(
+                                ui::localized(if connected { "Connected" } else { "Disabled" }, cx),
+                                11.,
+                                14.,
+                                cx.theme().colors().text_muted,
+                            )),
+                    )
+                    .child(group(
+                        vec![property(
                             "Display name",
                             "Name shown in your connections.",
                             name.to_string(),
-                        )]))
-                        .child(text(ui::localized("Runtime", cx), 13., 16., 0xB5B1C4))
-                        .child(group(vec![
+                            "Use default",
+                            cx,
+                        )],
+                        cx,
+                    ))
+                    .child(text(
+                        ui::localized("Runtime", cx),
+                        13.,
+                        16.,
+                        cx.theme().colors().text_muted,
+                    ))
+                    .child(group(
+                        vec![
                             property(
                                 "Binary path",
                                 "Executable used for this connection.",
-                                path.to_string_lossy().into_owned(),
+                                binary_path,
+                                "Use default",
+                                cx,
+                            ),
+                            property(
+                                "Home directory",
+                                "Configuration directory for this connection.",
+                                home_directory,
+                                "Use default",
+                                cx,
+                            ),
+                            property(
+                                "Account directory",
+                                "Optional isolated account configuration.",
+                                String::new(),
+                                "Use default",
+                                cx,
                             ),
                             property(
                                 "Launch arguments",
                                 "Additional arguments passed on startup.",
-                                args.join(" "),
+                                launch_arguments,
+                                "Add arguments…",
+                                cx,
                             ),
-                        ]))
-                        .child(text(ui::localized("Environment", cx), 13., 16., 0xB5B1C4))
-                        .child(group(vec![property(
-                            "Variables",
-                            "Keys, base URLs, and connection-specific settings.",
-                            format!("{} configured", env.len()),
-                        )]));
-                }
+                        ],
+                        cx,
+                    ))
+                    .child(text(
+                        ui::localized("Environment", cx),
+                        13.,
+                        16.,
+                        cx.theme().colors().text_muted,
+                    ))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(20.))
+                            .p(px(16.))
+                            .bg(cx.theme().colors().surface_background)
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .rounded(px(9.))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap(px(5.))
+                                    .child(text(
+                                        ui::localized("Variables", cx),
+                                        13.,
+                                        16.,
+                                        cx.theme().colors().text,
+                                    ))
+                                    .child(text(
+                                        ui::localized(
+                                            "Keys, base URLs, and connection-specific settings.",
+                                            cx,
+                                        ),
+                                        11.,
+                                        14.,
+                                        cx.theme().colors().text_muted,
+                                    )),
+                            )
+                            .child(
+                                ButtonLike::new("add-connection-variable")
+                                    .size(ButtonSize::None)
+                                    .child(text(
+                                        ui::localized("＋ Add variable", cx),
+                                        12.,
+                                        16.,
+                                        cx.theme().colors().text_accent,
+                                    ))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let existing =
+                                            super::external_agents_page::custom_agent_settings(
+                                                &add_variable_id,
+                                                cx,
+                                            )
+                                            .map(|settings| (add_variable_id.clone(), settings));
+                                        super::external_agents_page::open_custom_agent_form(
+                                            this, existing, window, cx,
+                                        );
+                                    })),
+                            ),
+                    );
                 let source = *source;
-                let edit_id = id.clone();
                 detail = detail.child(
                     h_flex()
-                        .justify_between()
+                        .gap(px(16.))
                         .child(
                             ButtonLike::new("configure-connection")
+                                .size(ButtonSize::None)
                                 .child(text(
-                                    ui::localized("Configure connection", cx),
+                                    ui::localized("Reconnect", cx),
                                     12.,
                                     16.,
-                                    0xBDB1CD,
+                                    cx.theme().colors().text_muted,
                                 ))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     let existing =
@@ -193,13 +295,15 @@ pub(crate) fn render_model_connections_page(
                                     );
                                 })),
                         )
+                        .child(div().flex_1())
                         .child(
                             ButtonLike::new("remove-connection")
+                                .size(ButtonSize::None)
                                 .child(text(
                                     ui::localized("Remove connection", cx),
                                     12.,
                                     16.,
-                                    0xC79EA5,
+                                    cx.theme().status().error,
                                 ))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     super::external_agents_page::remove_agent(&id, source, cx);
@@ -215,14 +319,14 @@ pub(crate) fn render_model_connections_page(
             ui::localized("Add a connection to get started.", cx),
             13.,
             20.,
-            0xA1A4B8,
+            cx.theme().colors().text_muted,
         ));
     }
     v_flex()
         .id("model-connections-page")
         .size_full()
         .min_w_0()
-        .bg(gpui::rgb(0x232530))
+        .bg(cx.theme().colors().background)
         .pt(px(36.))
         .pb(px(28.))
         .px(px(32.))
@@ -235,14 +339,19 @@ pub(crate) fn render_model_connections_page(
                 .child(
                     ButtonLike::new("back-to-ai")
                         .size(ButtonSize::None)
-                        .child(text(ui::localized("← AI settings", cx), 12., 16., 0xACA2BC))
+                        .child(text(
+                            ui::localized("← AI settings", cx),
+                            12.,
+                            16.,
+                            cx.theme().colors().text_muted,
+                        ))
                         .on_click(cx.listener(|this, _, window, cx| this.pop_sub_page(window, cx))),
                 )
                 .child(text(
                     ui::localized("Model connections", cx),
                     26.,
                     34.,
-                    0xECECF2,
+                    cx.theme().colors().text,
                 )),
         )
         .child(
@@ -251,26 +360,32 @@ pub(crate) fn render_model_connections_page(
                 .min_h(px(694.))
                 .items_stretch()
                 .border_1()
-                .border_color(gpui::rgb(0x414453))
+                .border_color(cx.theme().colors().border)
                 .rounded(px(10.))
                 .overflow_hidden()
                 .child(
                     v_flex()
                         .w(px(250.))
                         .flex_none()
-                        .bg(gpui::rgb(0x262935))
+                        .bg(cx.theme().colors().elevated_surface_background)
                         .border_r_1()
-                        .border_color(gpui::rgb(0x414453))
+                        .border_color(cx.theme().colors().border)
                         .child(
                             h_flex()
                                 .h(px(48.))
+                                .items_center()
                                 .px(px(14.))
                                 .gap(px(10.))
                                 .border_b_1()
-                                .border_color(gpui::rgb(0x3C3F4C))
+                                .border_color(cx.theme().colors().border)
                                 .child(
-                                    text(ui::localized("Connections", cx), 13., 16., 0xDCD8E7)
-                                        .flex_1(),
+                                    text(
+                                        ui::localized("Connections", cx),
+                                        13.,
+                                        16.,
+                                        cx.theme().colors().text,
+                                    )
+                                    .flex_1(),
                                 )
                                 .child(add_connection_menu(settings_window, cx)),
                         )
@@ -279,7 +394,7 @@ pub(crate) fn render_model_connections_page(
                             ui::localized("Use + to add a provider or custom ACP agent.", cx),
                             11.,
                             17.,
-                            0x9196AB,
+                            cx.theme().colors().text_muted,
                         ))),
                 )
                 .child(detail),
@@ -299,46 +414,43 @@ fn connection_row(
         .size(ButtonSize::None)
         .full_width()
         .corner_radius(px(0.))
-        .when(selected, |this| this.background(gpui::rgb(0x373342).into()))
-        .child(
-            v_flex()
-                .gap(px(6.))
-                .child(text(name, 14., 18., 0xDFD9E9))
-                .child(text(ui::localized(status, cx), 11., 14., 0xA3A7B9))
-                .flex_1(),
-        )
-        .when_some(enabled, |this, (id, enabled)| {
-            this.child(
-                ui::Switch::new(format!("enable-agent-{}", id.0), enabled.into())
-                    .settings_style()
-                    .on_click(move |state, _, cx| {
-                        cx.stop_propagation();
-                        let enabled = *state == ToggleState::Selected;
-                        let id = id.0.to_string();
-                        settings::update_settings_file(
-                            <dyn fs::Fs>::global(cx),
-                            cx,
-                            move |settings, _| {
-                                let disabled =
-                                    &mut settings.agent.get_or_insert_default().disabled_servers;
-                                disabled.retain(|disabled| *disabled != id);
-                                if !enabled {
-                                    disabled.push(id);
-                                }
-                            },
-                        );
-                    }),
-            )
+        .when(selected, |this| {
+            this.background(cx.theme().colors().element_active.into())
         })
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap(px(12.))
+                .child(
+                    v_flex()
+                        .gap(px(6.))
+                        .text_left()
+                        .child(text(name, 14., 18., cx.theme().colors().text))
+                        .child(text(
+                            ui::localized(status, cx),
+                            11.,
+                            14.,
+                            cx.theme().colors().text_muted,
+                        ))
+                        .flex_1(),
+                )
+                .when_some(enabled, |this, (id, enabled)| {
+                    this.child(connection_toggle(id, enabled, cx))
+                }),
+        )
         .on_click(cx.listener(move |this, _, _, cx| {
             this.selected_connection = Some(key.clone());
             cx.notify();
         }))
-        .custom_style(|this| {
-            this.px(px(14.))
-                .py(px(16.))
-                .border_b_1()
-                .border_color(gpui::rgb(0x3C3F4C))
+        .custom_style({
+            let border = cx.theme().colors().border;
+            move |this| {
+                this.px(px(14.))
+                    .py(px(16.))
+                    .border_b_1()
+                    .border_color(border)
+            }
         })
         .into_any_element()
 }
@@ -348,22 +460,39 @@ fn add_connection_menu(
     cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement {
     let original_window = settings_window.original_window;
-    let settings_window = cx.entity().downgrade();
+    let settings_window_weak = cx.entity().downgrade();
     PopoverMenu::new("add-connection-menu")
+        .with_handle(settings_window.add_connection_menu_handle.clone())
         .anchor(gpui::Anchor::TopLeft)
+        .attach(gpui::Anchor::TopLeft)
+        .offset(gpui::point(px(1.5), px(6.5)))
         .trigger(
             ButtonLike::new("add-connection")
                 .size(ButtonSize::None)
                 .width(px(26.))
                 .height((px(26.)).into())
                 .corner_radius(px(5.))
-                .background((gpui::rgb(0x3A3346)).into())
-                .child(text(ui::localized("+", cx), 19., 24., 0xDCD8E7))
-                .custom_style(|this| this.border_1().border_color(gpui::rgb(0x5D506C))),
+                .background((cx.theme().colors().element_hover).into())
+                .child(text(
+                    ui::localized("+", cx),
+                    19.,
+                    24.,
+                    cx.theme().colors().text,
+                ))
+                .custom_style({
+                    let border_selected = cx.theme().colors().border_selected;
+                    move |this| {
+                        this.border_1()
+                            .border_color(border_selected)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                    }
+                }),
         )
         .menu(move |window, cx| {
-            let for_api = settings_window.clone();
-            let for_custom = settings_window.clone();
+            let for_api = settings_window_weak.clone();
+            let for_custom = settings_window_weak.clone();
             Some(ContextMenu::build(window, cx, move |menu, _, _| {
                 menu.dropdown_style(px(320.))
                     .header("ADD CONNECTION")
@@ -423,28 +552,76 @@ fn add_connection_menu(
         })
 }
 
-fn group(rows: Vec<AnyElement>) -> Div {
+fn group(rows: Vec<AnyElement>, cx: &App) -> Div {
     v_flex()
-        .bg(gpui::rgb(0x282B37))
+        .bg(cx.theme().colors().surface_background)
         .border_1()
-        .border_color(gpui::rgb(0x414453))
+        .border_color(cx.theme().colors().border)
         .rounded(px(9.))
         .overflow_hidden()
         .children(rows)
 }
 
-fn property(title: &'static str, description: &'static str, value: String) -> AnyElement {
+fn connection_toggle(id: AgentId, enabled: bool, cx: &App) -> impl IntoElement {
+    ButtonLike::new(format!("enable-agent-{}", id.0))
+        .size(ButtonSize::None)
+        .width(px(30.))
+        .height(px(18.).into())
+        .corner_radius(px(10.))
+        .background(
+            if enabled {
+                cx.theme().colors().text_accent
+            } else {
+                cx.theme().colors().element_background
+            }
+            .into(),
+        )
+        .child(
+            h_flex()
+                .size_full()
+                .items_center()
+                .p(px(3.))
+                .when(enabled, |this| this.justify_end())
+                .child(
+                    div()
+                        .size(px(12.))
+                        .rounded_full()
+                        .bg(cx.theme().colors().text),
+                ),
+        )
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            let enabled = !enabled;
+            let id = id.0.to_string();
+            settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+                let disabled = &mut settings.agent.get_or_insert_default().disabled_servers;
+                disabled.retain(|disabled| *disabled != id);
+                if !enabled {
+                    disabled.push(id);
+                }
+            });
+        })
+}
+
+fn property(
+    title: &'static str,
+    description: &'static str,
+    value: String,
+    placeholder: &'static str,
+    cx: &App,
+) -> AnyElement {
     h_flex()
+        .items_center()
         .p(px(15.))
         .gap(px(20.))
         .border_b_1()
-        .border_color(gpui::rgb(0x393C49))
+        .border_color(cx.theme().colors().border)
         .child(
             v_flex()
                 .flex_1()
                 .gap(px(5.))
-                .child(text(title, 13., 16., 0xDFDBE9))
-                .child(text(description, 11., 16., 0xA1A5B9)),
+                .child(text(title, 13., 16., cx.theme().colors().text))
+                .child(text(description, 11., 16., cx.theme().colors().text_muted)),
         )
         .child(
             div()
@@ -453,18 +630,18 @@ fn property(title: &'static str, description: &'static str, value: String) -> An
                 .px(px(10.))
                 .py(px(7.))
                 .border_1()
-                .border_color(gpui::rgb(0x414453))
+                .border_color(cx.theme().colors().border)
                 .rounded(px(6.))
-                .bg(gpui::rgb(0x2B2E3A))
+                .bg(cx.theme().colors().surface_background)
                 .child(text(
                     if value.is_empty() {
-                        "Use default".to_string()
+                        placeholder.to_string()
                     } else {
                         value
                     },
                     12.,
                     16.,
-                    0xCECADA,
+                    cx.theme().colors().text_muted,
                 )),
         )
         .into_any_element()

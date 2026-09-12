@@ -272,7 +272,7 @@ TBD: Centered layout related settings
   "toolbar": {
     "breadcrumbs": true, // Whether to show breadcrumbs.
     "quick_actions": true, // Whether to show quick action buttons.
-    "selections_menu": true, // Whether to show the Selections menu
+    "selections_menu": false, // Whether to show the Selections menu
     "agent_review": true, // Whether to show agent review buttons
     "code_actions": false // Whether to show code action buttons
   }
@@ -356,11 +356,11 @@ TBD: Centered layout related settings
     // Show/hide a button that displays the buffer's line-ending mode.
     // Clicking the button brings up the line-ending selector.
     // Defaults to false.
-    "line_endings_button": false,
+    "line_endings_button": true,
     // Show/hide a button that displays the buffer's character encoding.
     // If set to "non_utf8", the button is hidden only for UTF-8 without BOM.
     // Defaults to "non_utf8".
-    "active_encoding_button": "non_utf8",
+    "active_encoding_button": "enabled",
     // Show/hide an indicator with a countdown while timed multi-stroke
     // input is pending. Hovering it pauses the timeout. Unless the which-key
     // menu is enabled, hovering also lists the bindings that could still match.

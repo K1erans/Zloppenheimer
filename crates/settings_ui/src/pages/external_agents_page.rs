@@ -530,7 +530,12 @@ pub(crate) fn render_custom_agent_modal(
     .map(|(label, editor)| {
         v_flex()
             .gap(px(7.))
-            .child(text(ui::localized(label, cx), 12., 16., 0xD6D1E1))
+            .child(text(
+                ui::localized(label, cx),
+                12.,
+                16.,
+                cx.theme().colors().text,
+            ))
             .child(input_box(editor, cx))
     });
     let testing = form.connection_test.is_some();
@@ -563,9 +568,9 @@ pub(crate) fn render_custom_agent_modal(
         .max_w_full()
         .p(px(24.))
         .gap(px(18.))
-        .bg(gpui::rgb(0x292C39))
+        .bg(cx.theme().colors().surface_background)
         .border_1()
-        .border_color(gpui::rgb(0x554C62))
+        .border_color(cx.theme().colors().border_selected)
         .rounded(px(12.))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {
@@ -574,6 +579,7 @@ pub(crate) fn render_custom_agent_modal(
         }))
         .child(
             h_flex()
+                .items_center()
                 .justify_between()
                 .child(text(
                     if form.original_id.is_some() {
@@ -583,12 +589,17 @@ pub(crate) fn render_custom_agent_modal(
                     },
                     20.,
                     24.,
-                    0xE5E0EE,
+                    cx.theme().colors().text,
                 ))
                 .child(
                     ButtonLike::new("close-custom-agent")
                         .size(ButtonSize::None)
-                        .child(text(ui::localized("×", cx), 16., 20., 0xACA6B9))
+                        .child(text(
+                            ui::localized("×", cx),
+                            16.,
+                            20.,
+                            cx.theme().colors().text_muted,
+                        ))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.custom_agent_form = None;
                             cx.notify();
@@ -598,12 +609,13 @@ pub(crate) fn render_custom_agent_modal(
         .children(fields)
         .child(
             h_flex()
+                .items_center()
                 .justify_between()
                 .child(text(
                     ui::localized("Environment variables", cx),
                     12.,
                     16.,
-                    0xD6D1E1,
+                    cx.theme().colors().text,
                 ))
                 .child(
                     ButtonLike::new("custom-agent-env-add")
@@ -612,7 +624,7 @@ pub(crate) fn render_custom_agent_modal(
                             ui::localized("＋ Add variable", cx),
                             12.,
                             16.,
-                            0xCDBBDF,
+                            cx.theme().colors().text_accent,
                         ))
                         .on_click(cx.listener(|this, _, window, cx| {
                             let row = new_kv_row(None, None, window, cx);
@@ -646,10 +658,11 @@ pub(crate) fn render_custom_agent_modal(
             this.child(render_form_error(error))
         })
         .when_some(form.connection_test_result.clone(), |this, result| {
-            this.child(text(result, 12., 16., 0xCDBBDF))
+            this.child(text(result, 12., 16., cx.theme().colors().text_accent))
         })
         .child(
             h_flex()
+                .items_center()
                 .gap(px(10.))
                 .pt(px(8.))
                 .child(
@@ -664,7 +677,7 @@ pub(crate) fn render_custom_agent_modal(
                             },
                             12.,
                             16.,
-                            0xCCBDD9,
+                            cx.theme().colors().text_accent,
                         ))
                         .on_click(cx.listener(test_custom_agent_form)),
                 )
@@ -672,7 +685,13 @@ pub(crate) fn render_custom_agent_modal(
                 .child(
                     ButtonLike::new("cancel-custom-agent")
                         .size(ButtonSize::None)
-                        .child(text(ui::localized("Cancel", cx), 12., 16., 0xC3BED0))
+                        .height(px(34.).into())
+                        .child(text(
+                            ui::localized("Cancel", cx),
+                            12.,
+                            16.,
+                            cx.theme().colors().text_muted,
+                        ))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.custom_agent_form = None;
                             cx.notify();
@@ -682,7 +701,8 @@ pub(crate) fn render_custom_agent_modal(
                 .child(
                     ButtonLike::new("save-custom-agent")
                         .size(ButtonSize::None)
-                        .background((gpui::rgb(0x493D57)).into())
+                        .height(px(34.).into())
+                        .background((cx.theme().colors().element_hover).into())
                         .corner_radius(px(6.))
                         .child(text(
                             if form.original_id.is_some() {
@@ -692,16 +712,19 @@ pub(crate) fn render_custom_agent_modal(
                             },
                             12.,
                             16.,
-                            0xEFE7F6,
+                            cx.theme().colors().text,
                         ))
                         .on_click(cx.listener(|this, _, window, cx| {
                             save_custom_agent_form(this, window, cx)
                         }))
-                        .custom_style(|this| {
-                            this.px(px(13.))
-                                .py(px(8.))
-                                .border_1()
-                                .border_color(gpui::rgb(0x695B79))
+                        .custom_style({
+                            let border_selected = cx.theme().colors().border_selected;
+                            move |this| {
+                                this.px(px(13.))
+                                    .py(px(8.))
+                                    .border_1()
+                                    .border_color(border_selected)
+                            }
                         }),
                 ),
         );
@@ -709,8 +732,7 @@ pub(crate) fn render_custom_agent_modal(
     div()
         .absolute()
         .inset_0()
-        .top(px(36.))
-        .bg(gpui::rgba(0x11131C99))
+        .bg(cx.theme().colors().background.opacity(0.6))
         .flex()
         .justify_center()
         .items_start()
@@ -791,10 +813,10 @@ fn input_box(editor: &Entity<Editor>, cx: &App) -> impl IntoElement {
         .px(px(12.))
         .rounded(px(6.))
         .border_1()
-        .border_color(gpui::rgb(0x484959))
-        .bg(gpui::rgb(0x252833))
+        .border_color(cx.theme().colors().border)
+        .bg(cx.theme().colors().panel_background)
         .track_focus(&focus_handle)
-        .focus(|style| style.border_color(gpui::rgb(0xA99ABD)))
+        .focus(|style| style.border_color(cx.theme().colors().border_focused))
         .child(editor.clone())
 }
 

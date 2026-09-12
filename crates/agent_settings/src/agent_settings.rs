@@ -1069,18 +1069,18 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_prevent_idle_sleep_defaults_to_true_and_follows_user_settings(cx: &mut gpui::App) {
+    fn test_prevent_idle_sleep_defaults_to_false_and_follows_user_settings(cx: &mut gpui::App) {
         let store = SettingsStore::test(cx);
         cx.set_global(store);
         project::DisableAiSettings::register(cx);
         AgentSettings::register(cx);
-        assert!(AgentSettings::get_global(cx).prevent_idle_sleep);
+        assert!(!AgentSettings::get_global(cx).prevent_idle_sleep);
 
         for (content, expected) in [
             (r#"{"agent": {"prevent_idle_sleep": false}}"#, false),
             (r#"{"agent": {"prevent_idle_sleep": true}}"#, true),
-            (r#"{"agent": {"prevent_idle_sleep": null}}"#, true),
-            (r#"{"agent": {}}"#, true),
+            (r#"{"agent": {"prevent_idle_sleep": null}}"#, false),
+            (r#"{"agent": {}}"#, false),
         ] {
             SettingsStore::update_global(cx, |store, cx| {
                 store

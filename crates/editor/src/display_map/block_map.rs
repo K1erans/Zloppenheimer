@@ -1287,8 +1287,14 @@ impl BlockMap {
                         excerpt: excerpt_boundary.next,
                         height,
                     }
-                } else if excerpt_boundary.prev.is_some() {
-                    height += self.excerpt_header_height;
+                } else if excerpt_boundary.prev.is_some()
+                    || (!buffer.show_headers() && buffer.has_diff_hunks())
+                {
+                    height += if buffer.has_diff_hunks() {
+                        2
+                    } else {
+                        self.excerpt_header_height
+                    };
                     Block::ExcerptBoundary {
                         excerpt: excerpt_boundary.next,
                         height,

@@ -19,9 +19,9 @@ use gpui::{
     Action, AppContext as _, AsyncApp, ClickEvent, Context, DismissEvent, Entity, EventEmitter,
     FocusHandle, Focusable, Global, IsZero,
     KeyBindingContextPredicate::{And, Descendant, Equal, Identifier, Not, NotEqual, Or},
-    KeyContext, KeybindingKeystroke, MouseButton, PlatformKeyboardMapper, Point, ScrollStrategy,
-    ScrollWheelEvent, Stateful, StyledText, Subscription, Task, TextStyleRefinement, WeakEntity,
-    actions, anchored, deferred, div,
+    KeyContext, KeybindingKeystroke, MouseButton, PlatformKeyboardMapper, Point, ReadGlobal as _,
+    ScrollStrategy, ScrollWheelEvent, Stateful, StyledText, Subscription, Task, TextStyleRefinement,
+    WeakEntity, actions, anchored, deferred, div,
 };
 use language::{Language, LanguageConfig, ToOffset as _};
 
@@ -4513,37 +4513,61 @@ mod tests {
 }
 
 impl KeymapEditor {
-    fn render_embedded(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let text = |value: SharedString, size: f32, color: u32| {
+    fn render_embedded(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let text = |value: SharedString, size: f32, line_height: f32, color: gpui::Hsla| {
             div()
                 .text_size(px(size))
-                .line_height(px(16.))
-                .text_color(gpui::rgb(color))
+                .line_height(px(line_height))
+                .text_color(color)
                 .child(value)
         };
         let columns = [300., 130., 150., 416., 88.];
+        let border = cx.theme().colors().border;
+        let border_selected = cx.theme().colors().border_selected;
         let focus_handle = self.focus_handle.clone();
+        let vim_bindings = settings::SettingsStore::global(cx)
+            .merged_settings()
+            .vim_mode
+            .unwrap_or(false);
+        let keymap_label: SharedString = if vim_bindings {
+            ui::localized("Vim bindings", cx)
+        } else {
+            format!("{} bindings", BaseKeymap::get_global(cx)).into()
+        };
+        let json_shortcut =
+            ui::KeyBinding::for_action_in(&zed_actions::OpenKeymapFile, &focus_handle, cx)
+                .size(rems_from_px(10_f32))
+                .style(ui::KeyBindingStyle::Label)
+                .color(Color::Muted);
+        let create_shortcut =
+            ui::KeyBinding::for_action_in(&OpenCreateKeybindingModal, &focus_handle, cx)
+                .size(rems_from_px(10_f32))
+                .style(ui::KeyBindingStyle::Label)
+                .color(Color::Accent);
+        let show_json_shortcut = json_shortcut.has_binding(window);
+        let show_create_shortcut = create_shortcut.has_binding(window);
         let table = v_flex()
             .flex_1()
             .min_h_0()
             .border_1()
-            .border_color(gpui::rgb(0x3C3F4C))
+            .border_color(cx.theme().colors().border)
             .rounded(px(9.))
             .overflow_hidden()
             .child(
                 h_flex()
                     .h(px(36.))
+                    .items_center()
                     .flex_none()
                     .px(px(15.))
-                    .bg(gpui::rgb(0x2B2E3A))
+                    .bg(cx.theme().colors().surface_background)
                     .border_b_1()
-                    .border_color(gpui::rgb(0x414453))
+                    .border_color(cx.theme().colors().border)
                     .children(
                         ["Action", "Arguments", "Keystrokes", "Context", "Source"]
                             .into_iter()
                             .zip(columns)
                             .map(|(label, width)| {
-                                text(ui::localized(label, cx), 12., 0xA1A4B8)
+                                text(ui::localized(label, cx), 12., 16., cx.theme().colors().text_muted)
                                     .w(px(width))
                                     .min_w_0()
                                     .overflow_hidden()
@@ -4584,15 +4608,16 @@ impl KeymapEditor {
                                     h_flex()
                                         .id(("embedded-binding", index))
                                         .h(px(27.))
+                                        .items_center()
                                         .px(px(15.))
                                         .cursor_pointer()
-                                        .bg(gpui::rgb(if this.selected_index == Some(index) {
-                                            0x373342
+                                        .bg(if this.selected_index == Some(index) {
+                                            cx.theme().colors().element_active
                                         } else if index % 2 == 0 {
-                                            0x252833
+                                            cx.theme().colors().background
                                         } else {
-                                            0x292C38
-                                        }))
+                                            cx.theme().colors().surface_background
+                                        })
                                         .children(cells.into_iter().zip(columns).enumerate().map(
                                             |(column, (value, width))| {
                                                 div()
@@ -4605,14 +4630,18 @@ impl KeymapEditor {
                                                     } else {
                                                         12.
                                                     }))
-                                                    .line_height(px(16.))
-                                                    .text_color(gpui::rgb(if column == 2 {
-                                                        0xD9CBE8
-                                                    } else if column == 0 {
-                                                        0xCACBD9
+                                                    .line_height(px(if column == 2 || column == 3 {
+                                                        12.
                                                     } else {
-                                                        0xA1A4B8
+                                                        16.
                                                     }))
+                                                    .text_color(if column == 2 {
+                                                        cx.theme().colors().text_accent
+                                                    } else if column == 0 {
+                                                        cx.theme().colors().text
+                                                    } else {
+                                                        cx.theme().colors().text_muted
+                                                    })
                                                     .child(value)
                                             },
                                         ))
@@ -4649,30 +4678,28 @@ impl KeymapEditor {
             .on_action(cx.listener(Self::toggle_no_action_bindings))
             .on_action(cx.listener(Self::toggle_keystroke_search))
             .on_action(cx.listener(Self::toggle_exact_keystroke_matching))
-            .bg(gpui::rgb(0x232530))
+            .bg(cx.theme().colors().background)
             .px(px(32.))
             .pt(px(32.))
             .pb(px(24.))
-            .gap(px(16.))
+            .gap(px(20.))
             .child(
                 h_flex()
+                    .items_center()
                     .justify_between()
                     .child(
                         div()
                             .text_size(px(26.))
                             .line_height(px(34.))
-                            .text_color(gpui::rgb(0xECECF2))
+                            .text_color(cx.theme().colors().text)
                             .child(ui::localized("Keymap", cx)),
                     )
-                    .child(text(
-                        format!("{} bindings", BaseKeymap::get_global(cx)).into(),
-                        12.,
-                        0xA1A4B8,
-                    )),
+                    .child(text(keymap_label, 12., 16., cx.theme().colors().text_muted)),
             )
             .child(
                 h_flex()
                     .h(px(36.))
+                    .items_center()
                     .flex_none()
                     .gap(px(10.))
                     .child(
@@ -4680,30 +4707,54 @@ impl KeymapEditor {
                             .flex_1()
                             .min_w_0()
                             .h_full()
+                            .items_center()
                             .px(px(12.))
                             .gap(px(10.))
                             .rounded(px(7.))
                             .border_1()
-                            .border_color(gpui::rgb(0x414453))
-                            .bg(gpui::rgb(0x292C38))
+                            .border_color(cx.theme().colors().border)
+                            .bg(cx.theme().colors().surface_background)
                             .child(
                                 Icon::new(IconName::MagnifyingGlass)
-                                    .size(IconSize::Custom(rems_from_px(15_f32))),
+                                    .size(IconSize::Custom(rems_from_px(16_f32)))
+                                    .color(Color::Muted),
                             )
                             .child(self.filter_editor.clone()),
                     )
-                    .child(self.render_filter_dropdown(&focus_handle, cx))
+                    .child(
+                        ui::ButtonLike::new("embedded-keymap-keystroke")
+                            .size(ButtonSize::None)
+                            .width(px(36.))
+                            .height(px(36.).into())
+                            .corner_radius(px(7.))
+                            .tooltip(Tooltip::text("Search by Keystrokes"))
+                            .child(
+                                Icon::new(IconName::Keyboard)
+                                    .size(IconSize::Custom(rems_from_px(17_f32)))
+                                    .color(Color::Muted),
+                            )
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                window.dispatch_action(ToggleKeystrokeSearch.boxed_clone(), cx)
+                            }))
+                            .custom_style(move |this| this.border_1().border_color(border)),
+                    )
                     .child(
                         ui::ButtonLike::new("embedded-keymap-json")
                             .size(ButtonSize::None)
                             .height(px(36.).into())
                             .corner_radius(px(7.))
-                            .custom_style(|this| {
+                            .custom_style(move |this| {
                                 this.px(px(12.))
                                     .border_1()
-                                    .border_color(gpui::rgb(0x414453))
+                                    .border_color(border)
                             })
-                            .child(text(ui::localized("Edit in JSON", cx), 12., 0xD3D1DF))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(9.))
+                                    .child(text(ui::localized("Edit in JSON", cx), 12., 16., cx.theme().colors().text))
+                                    .when(show_json_shortcut, |this| this.child(json_shortcut)),
+                            )
                             .on_click(|_, window, cx| {
                                 window
                                     .dispatch_action(zed_actions::OpenKeymapFile.boxed_clone(), cx)
@@ -4714,24 +4765,28 @@ impl KeymapEditor {
                             .size(ButtonSize::None)
                             .height(px(36.).into())
                             .corner_radius(px(7.))
-                            .background(gpui::rgb(0x3A3346).into())
-                            .custom_style(|this| {
+                            .background(cx.theme().colors().element_hover.into())
+                            .custom_style(move |this| {
                                 this.px(px(12.))
                                     .border_1()
-                                    .border_color(gpui::rgb(0x655971))
+                                    .border_color(border_selected)
                             })
                             .child(
                                 h_flex()
+                                    .items_center()
                                     .gap(px(9.))
                                     .child(
                                         Icon::new(IconName::Plus)
-                                            .size(IconSize::Custom(rems_from_px(14_f32))),
+                                            .size(IconSize::Custom(rems_from_px(14_f32)))
+                                            .color(Color::Muted),
                                     )
                                     .child(text(
                                         ui::localized("Create keybinding", cx),
                                         12.,
-                                        0xE0D4EF,
-                                    )),
+                                        16.,
+                                        cx.theme().colors().text_accent,
+                                    ))
+                                    .when(show_create_shortcut, |this| this.child(create_shortcut)),
                             )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_create_keybinding_modal(
@@ -4750,15 +4805,18 @@ impl KeymapEditor {
             .child(
                 h_flex()
                     .justify_between()
+                    .items_center()
                     .child(text(
-                        format!("{} bindings", self.matches.len()).into(),
+                        format!("{} bindings shown", self.matches.len()).into(),
                         11.,
-                        0x989BAD,
+                        16.,
+                        cx.theme().colors().text_muted,
                     ))
                     .child(text(
                         ui::localized("Select a binding to edit its shortcut", cx),
                         11.,
-                        0x989BAD,
+                        16.,
+                        cx.theme().colors().text_muted,
                     )),
             )
             .when_some(self.embedded_modal.clone(), |this, modal| {
@@ -4766,7 +4824,7 @@ impl KeymapEditor {
                     div()
                         .absolute()
                         .inset_0()
-                        .bg(gpui::rgba(0x11131C99))
+                        .bg(cx.theme().colors().background.opacity(0.6))
                         .flex()
                         .justify_center()
                         .items_start()

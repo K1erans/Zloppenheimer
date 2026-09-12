@@ -4,6 +4,7 @@ use acp_thread::{
     AgentModelIcon, AgentModelId, AgentModelInfo, AgentModelList, AgentModelSelector,
 };
 
+use agent_settings::AgentSettings;
 use anyhow::Result;
 use collections::{HashSet, IndexMap};
 use futures::FutureExt;
@@ -15,7 +16,7 @@ use gpui::{
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
-use settings::SettingsStore;
+use settings::{Settings as _, SettingsStore};
 use ui::{DocumentationAside, IntoElement, prelude::*};
 use util::ResultExt;
 use zed_actions::agent::OpenSettings;
@@ -39,6 +40,8 @@ pub fn acp_model_selector(
 }
 
 enum ModelPickerEntry {
+    Default,
+    Divider,
     Separator(SharedString),
     Model(AgentModelInfo, bool),
 }
@@ -129,6 +132,37 @@ impl ModelPickerDelegate {
         self.selected_model.as_ref()
     }
 
+    fn settings_default_model_id(cx: &App) -> Option<AgentModelId> {
+        let selection = AgentSettings::try_get(cx)?.default_model.as_ref()?;
+        Some(AgentModelId::new(format!(
+            "{}/{}",
+            selection.provider.0, selection.model
+        )))
+    }
+
+    fn settings_default_model(&self, cx: &App) -> Option<AgentModelInfo> {
+        let default_id = Self::settings_default_model_id(cx)?;
+        let models = self.models.as_ref()?;
+        match models {
+            AgentModelList::Flat(list) => list.iter().find(|model| model.id == default_id).cloned(),
+            AgentModelList::Grouped(groups) => groups
+                .values()
+                .flatten()
+                .find(|model| model.id == default_id)
+                .cloned(),
+        }
+    }
+
+    fn selected_is_settings_default(&self, cx: &App) -> bool {
+        match (
+            self.selected_model.as_ref(),
+            Self::settings_default_model_id(cx),
+        ) {
+            (Some(selected), Some(default_id)) => selected.id == default_id,
+            _ => false,
+        }
+    }
+
     pub fn favorites_count(&self) -> usize {
         self.favorites.len()
     }
@@ -210,8 +244,8 @@ impl PickerDelegate for ModelPickerDelegate {
 
     fn can_select(&self, ix: usize, _window: &mut Window, _cx: &mut Context<Picker<Self>>) -> bool {
         match self.filtered_entries.get(ix) {
-            Some(ModelPickerEntry::Model(_, _)) => true,
-            Some(ModelPickerEntry::Separator(_)) | None => false,
+            Some(ModelPickerEntry::Model(_, _) | ModelPickerEntry::Default) => true,
+            Some(ModelPickerEntry::Separator(_) | ModelPickerEntry::Divider) | None => false,
         }
     }
 
@@ -232,6 +266,7 @@ impl PickerDelegate for ModelPickerDelegate {
         let favorites = self.favorites.clone();
 
         cx.spawn_in(window, async move |this, cx| {
+            let query_empty = query.is_empty();
             let filtered_models = match this
                 .read_with(cx, |this, cx| {
                     this.delegate.models.clone().map(move |models| {
@@ -246,23 +281,30 @@ impl PickerDelegate for ModelPickerDelegate {
             };
 
             this.update_in(cx, |this, window, cx| {
-                this.delegate.filtered_entries =
-                    info_list_to_picker_entries(filtered_models, &favorites);
-                // Finds the currently selected model in the list
-                let new_index = this
-                    .delegate
-                    .selected_model
-                    .as_ref()
-                    .and_then(|selected| {
-                        this.delegate.filtered_entries.iter().position(|entry| {
-                            if let ModelPickerEntry::Model(model_info, _) = entry {
-                                model_info.id == selected.id
-                            } else {
-                                false
-                            }
+                let mut entries = info_list_to_picker_entries(filtered_models, &favorites);
+                if query_empty {
+                    entries.insert(0, ModelPickerEntry::Divider);
+                    entries.insert(0, ModelPickerEntry::Default);
+                }
+                this.delegate.filtered_entries = entries;
+                let selected_is_default = this.delegate.selected_is_settings_default(cx);
+                let new_index = if query_empty && selected_is_default {
+                    0
+                } else {
+                    this.delegate
+                        .selected_model
+                        .as_ref()
+                        .and_then(|selected| {
+                            this.delegate.filtered_entries.iter().position(|entry| {
+                                if let ModelPickerEntry::Model(model_info, _) = entry {
+                                    model_info.id == selected.id
+                                } else {
+                                    false
+                                }
+                            })
                         })
-                    })
-                    .unwrap_or(0);
+                        .unwrap_or(0)
+                };
                 this.set_selected_index(new_index, Some(picker::Direction::Down), true, window, cx);
                 cx.notify();
             })
@@ -271,18 +313,29 @@ impl PickerDelegate for ModelPickerDelegate {
     }
 
     fn confirm(&mut self, _secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
-        if let Some(ModelPickerEntry::Model(model_info, _)) =
-            self.filtered_entries.get(self.selected_index)
-            && model_info.disabled.is_none()
-        {
-            self.selector
-                .select_model(model_info.id.clone(), cx)
-                .detach_and_log_err(cx);
-            self.selected_model = Some(model_info.clone());
-            let current_index = self.selected_index;
-            self.set_selected_index(current_index, window, cx);
+        match self.filtered_entries.get(self.selected_index) {
+            Some(ModelPickerEntry::Default) => {
+                if let Some(model_info) = self.settings_default_model(cx) {
+                    self.selector
+                        .select_model(model_info.id.clone(), cx)
+                        .detach_and_log_err(cx);
+                    self.selected_model = Some(model_info);
+                    let current_index = self.selected_index;
+                    self.set_selected_index(current_index, window, cx);
+                    cx.emit(DismissEvent);
+                }
+            }
+            Some(ModelPickerEntry::Model(model_info, _)) if model_info.disabled.is_none() => {
+                self.selector
+                    .select_model(model_info.id.clone(), cx)
+                    .detach_and_log_err(cx);
+                self.selected_model = Some(model_info.clone());
+                let current_index = self.selected_index;
+                self.set_selected_index(current_index, window, cx);
 
-            cx.emit(DismissEvent);
+                cx.emit(DismissEvent);
+            }
+            _ => {}
         }
     }
 
@@ -300,11 +353,40 @@ impl PickerDelegate for ModelPickerDelegate {
         cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
         match self.filtered_entries.get(ix)? {
+            ModelPickerEntry::Default => {
+                let default_model = self.settings_default_model(cx);
+                let default_name = default_model
+                    .as_ref()
+                    .map(|model| model.name.clone())
+                    .unwrap_or_else(|| SharedString::from("Default"));
+                let subtitle = format!("{default_name} · Set in AI settings");
+                Some(
+                    ModelSelectorListItem::new(ix, "Default")
+                        .subtitle(subtitle)
+                        .is_selected(self.selected_is_settings_default(cx))
+                        .is_focused(selected)
+                        .into_any_element(),
+                )
+            }
+            ModelPickerEntry::Divider => Some(
+                div()
+                    .h(px(1.))
+                    .w_full()
+                    .bg(cx.theme().colors().border)
+                    .into_any_element(),
+            ),
             ModelPickerEntry::Separator(title) => {
                 Some(ModelSelectorHeader::new(title, ix > 1).into_any_element())
             }
             ModelPickerEntry::Model(model_info, is_favorite) => {
-                let is_selected = Some(model_info) == self.selected_model.as_ref();
+                let default_row_visible = matches!(
+                    self.filtered_entries.first(),
+                    Some(ModelPickerEntry::Default)
+                );
+                let is_settings_default = Self::settings_default_model_id(cx)
+                    .is_some_and(|default_id| model_info.id == default_id);
+                let is_selected = Some(model_info) == self.selected_model.as_ref()
+                    && !(default_row_visible && is_settings_default);
 
                 let is_favorite = *is_favorite;
                 let handle_action_click = {
@@ -597,7 +679,20 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
         window_handle
             .update(&mut cx, |picker, window, cx| {
-                picker.delegate.set_selected_index(1, window, cx);
+                let manual_index = picker
+                    .delegate
+                    .filtered_entries
+                    .iter()
+                    .position(|entry| {
+                        matches!(
+                            entry,
+                            ModelPickerEntry::Model(info, _) if info.id.as_ref() == "manual"
+                        )
+                    })
+                    .unwrap_or(1);
+                picker
+                    .delegate
+                    .set_selected_index(manual_index, window, cx);
                 picker.delegate.confirm(false, window, cx);
             })
             .unwrap();
@@ -668,7 +763,9 @@ mod tests {
             .iter()
             .map(|entry| match entry {
                 ModelPickerEntry::Model(info, _) => info.id.as_ref(),
-                ModelPickerEntry::Separator(s) => &s,
+                ModelPickerEntry::Separator(s) => s.as_ref(),
+                ModelPickerEntry::Default => "Default",
+                ModelPickerEntry::Divider => "",
             })
             .collect()
     }

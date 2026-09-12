@@ -11,26 +11,24 @@ use editor::actions::{
 use editor::code_context_menus::{CodeContextMenu, ContextMenuOrigin};
 use editor::{Editor, EditorSettings};
 use gpui::{
-    Action, Anchor, AnchoredPositionMode, ClickEvent, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, ParentElement, Render, Styled, Subscription,
-    WeakEntity, Window, anchored, deferred, point,
+    Action, Anchor, AnchoredPositionMode, Context, Entity, EventEmitter, Focusable,
+    InteractiveElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window, anchored,
+    deferred, point,
 };
 use project::{
     DisableAiSettings,
     project_settings::{DiagnosticSeverity, ProjectSettings},
 };
-use search::{BufferSearchBar, buffer_search};
 use settings::{GitDiffBaseSetting, Settings, SettingsStore, update_settings_file};
 use ui::{
     ButtonStyle, ContextMenu, ContextMenuEntry, DocumentationSide, IconButton, IconName, IconSize,
     PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*,
 };
 use vim_mode_setting::{HelixModeSetting, VimModeSetting};
-use workspace::item::ItemBufferKind;
 use workspace::{
     ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace, item::ItemHandle,
 };
-use zed_actions::{agent::AddSelectionToThread, assistant::InlineAssist, outline::ToggleOutline};
+use zed_actions::{agent::AddSelectionToThread, outline::ToggleOutline};
 
 const MAX_CODE_ACTION_MENU_LINES: u32 = 16;
 
@@ -38,7 +36,6 @@ pub struct QuickActionBar {
     _inlay_hints_enabled_subscription: Option<Subscription>,
     _ai_settings_subscription: Subscription,
     active_item: Option<Box<dyn ItemHandle>>,
-    buffer_search_bar: Entity<BufferSearchBar>,
     show: bool,
     toggle_selections_handle: PopoverMenuHandle<ContextMenu>,
     toggle_settings_handle: PopoverMenuHandle<ContextMenu>,
@@ -46,11 +43,7 @@ pub struct QuickActionBar {
 }
 
 impl QuickActionBar {
-    pub fn new(
-        buffer_search_bar: Entity<BufferSearchBar>,
-        workspace: &Workspace,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(workspace: &Workspace, cx: &mut Context<Self>) -> Self {
         let mut was_agent_enabled = AgentSettings::get_global(cx).enabled(cx);
         let mut was_agent_button = AgentSettings::get_global(cx).button;
 
@@ -69,7 +62,6 @@ impl QuickActionBar {
             _inlay_hints_enabled_subscription: None,
             _ai_settings_subscription: ai_settings_subscription,
             active_item: None,
-            buffer_search_bar,
             show: true,
             toggle_selections_handle: Default::default(),
             toggle_settings_handle: Default::default(),
@@ -139,38 +131,6 @@ impl Render for QuickActionBar {
         let minimap_enabled = supports_minimap && editor_value.minimap().is_some();
         let has_available_code_actions = editor_value.has_available_code_actions_for_selection();
         let code_action_enabled = editor_value.code_actions_enabled_for_toolbar(cx);
-        let focus_handle = editor_value.focus_handle(cx);
-
-        let search_button = (editor.buffer_kind(cx) == ItemBufferKind::Singleton).then(|| {
-            QuickActionBarButton::new(
-                "toggle buffer search",
-                search::SEARCH_ICON,
-                !self.buffer_search_bar.read(cx).is_dismissed(),
-                Box::new(buffer_search::Deploy::find()),
-                focus_handle.clone(),
-                "Buffer Search",
-                {
-                    let buffer_search_bar = self.buffer_search_bar.clone();
-                    move |_, window, cx| {
-                        buffer_search_bar.update(cx, |search_bar, cx| {
-                            search_bar.toggle(&buffer_search::Deploy::find(), window, cx)
-                        });
-                    }
-                },
-            )
-        });
-
-        let assistant_button = QuickActionBarButton::new(
-            "toggle inline assistant",
-            IconName::ZedAssistant,
-            false,
-            Box::new(InlineAssist::default()),
-            focus_handle,
-            "Inline Assist",
-            move |_, window, cx| {
-                window.dispatch_action(Box::new(InlineAssist::default()), cx);
-            },
-        );
 
         let code_actions_dropdown = code_action_enabled.then(|| {
             let is_deployed = {
@@ -336,8 +296,13 @@ impl Render for QuickActionBar {
 
             PopoverMenu::new("editor-settings")
                 .trigger_with_tooltip(
-                    IconButton::new("toggle_editor_settings_icon", IconName::Filter)
+                    IconButton::new("toggle_editor_settings_icon", IconName::Ellipsis)
+                        .size(ButtonSize::None)
+                        .width(px(24.))
+                        .height(px(25.).into())
+                        .corner_radius(px(5.))
                         .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
                         .toggle_state(self.toggle_settings_handle.is_deployed()),
                     Tooltip::text("Editor Controls"),
                 )
@@ -708,11 +673,6 @@ impl Render for QuickActionBar {
             .gap(DynamicSpacing::Base01.rems(cx))
             .children(self.render_repl_menu(cx))
             .children(self.render_preview_button(cx))
-            .children(search_button)
-            .when(
-                AgentSettings::get_global(cx).enabled(cx) && AgentSettings::get_global(cx).button,
-                |bar| bar.child(assistant_button),
-            )
             .children(code_actions_dropdown)
             .children(editor_selections_dropdown)
             .child(editor_settings_dropdown)
@@ -720,55 +680,6 @@ impl Render for QuickActionBar {
 }
 
 impl EventEmitter<ToolbarItemEvent> for QuickActionBar {}
-
-#[derive(IntoElement)]
-struct QuickActionBarButton {
-    id: ElementId,
-    icon: IconName,
-    toggled: bool,
-    action: Box<dyn Action>,
-    focus_handle: FocusHandle,
-    tooltip: SharedString,
-    on_click: Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>,
-}
-
-impl QuickActionBarButton {
-    fn new(
-        id: impl Into<ElementId>,
-        icon: IconName,
-        toggled: bool,
-        action: Box<dyn Action>,
-        focus_handle: FocusHandle,
-        tooltip: impl Into<SharedString>,
-        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            icon,
-            toggled,
-            action,
-            focus_handle,
-            tooltip: tooltip.into(),
-            on_click: Box::new(on_click),
-        }
-    }
-}
-
-impl RenderOnce for QuickActionBarButton {
-    fn render(self, _window: &mut Window, _: &mut App) -> impl IntoElement {
-        let tooltip = self.tooltip.clone();
-        let action = self.action.boxed_clone();
-
-        IconButton::new(self.id.clone(), self.icon)
-            .icon_size(IconSize::Small)
-            .style(ButtonStyle::Subtle)
-            .toggle_state(self.toggled)
-            .tooltip(move |_window, cx| {
-                Tooltip::for_action_in(tooltip.clone(), &*action, &self.focus_handle, cx)
-            })
-            .on_click(move |event, window, cx| (self.on_click)(event, window, cx))
-    }
-}
 
 impl ToolbarItemView for QuickActionBar {
     fn set_active_pane_item(

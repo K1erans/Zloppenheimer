@@ -10,15 +10,15 @@ use futures::{StreamExt, channel::mpsc};
 use fuzzy::StringMatchCandidate;
 use gpui::{
     Action, App, AsyncApp, ClipboardItem, Div, Entity, FocusHandle, Focusable, Global, KeyContext,
-    ListState, ReadGlobal as _, Role, ScrollHandle, Stateful, Subscription, Task, TitlebarOptions,
-    UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions,
-    actions, div, list, point, prelude::*, px, uniform_list,
+    ListState, ReadGlobal as _, Role, ScrollHandle, Stateful, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, WindowHandle, actions, div, list, point,
+    prelude::*, px, uniform_list,
 };
 
+use heck::ToTitleCase as _;
 use language::Buffer;
 use platform_title_bar::PlatformTitleBar;
 use project::{Project, ProjectPath, Worktree, WorktreeId};
-use release_channel::ReleaseChannel;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{
@@ -38,23 +38,23 @@ use std::{
 use theme_settings::ThemeSettings;
 use ui::{
     Banner, ButtonLike, ContextMenu, Divider, DropdownMenu, DropdownStyle, IconButtonShape,
-    KeyBinding, PopoverMenu, Scrollbars, Switch, Tooltip, TreeViewItem, WithScrollbar, prelude::*,
+    KeyBinding, PopoverMenu, PopoverMenuHandle, Scrollbars, Switch, Tooltip, TreeViewItem,
+    WithScrollbar, prelude::*,
 };
 
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
-    AppState, MultiWorkspace, OpenOptions, OpenVisible, Workspace, WorkspaceSettings,
-    client_side_decorations,
+    AppState, MultiWorkspace, OpenOptions, OpenVisible, Workspace, client_side_decorations,
 };
 use zed_actions::{
-    AGENT_SKILLS_SETTINGS_PATH, OpenProjectSettings, OpenSettings, OpenSettingsAt,
+    AGENT_SKILLS_SETTINGS_PATH, OpenKeymap, OpenProjectSettings, OpenSettings, OpenSettingsAt,
     OpenSettingsAtTarget, OpenSettingsPage,
 };
 
 use crate::components::{
-    EnumVariantDropdown, NumberField, NumberFieldMode, NumberFieldType, SettingsInputField,
-    SettingsSectionHeader, font_picker, icon_theme_picker, render_ollama_model_picker,
-    text_field_a11y_state, theme_picker,
+    NumberField, NumberFieldMode, NumberFieldType, SettingsInputField, SettingsSectionHeader,
+    font_picker, icon_theme_picker, render_ollama_model_picker, text_field_a11y_state,
+    theme_picker,
 };
 use crate::pages::{
     CustomAgentForm, LlmProviderForm, McpServerForm, render_input_audio_device_dropdown,
@@ -71,7 +71,6 @@ const CONTENT_CONTAINER_TAB_INDEX: isize = 4;
 const CONTENT_GROUP_TAB_INDEX: isize = 5;
 
 const SIDEBAR_WIDTH: Pixels = px(260.);
-const CONTENT_MIN_WIDTH: Pixels = px(400.);
 
 actions!(
     settings_editor,
@@ -846,6 +845,53 @@ pub fn open_skill_creator(
     });
 }
 
+struct EmbeddedSettings {
+    host: WindowHandle<MultiWorkspace>,
+    settings: WeakEntity<SettingsWindow>,
+}
+
+impl Global for EmbeddedSettings {}
+
+fn find_embedded_settings(
+    cx: &App,
+) -> Option<(WindowHandle<MultiWorkspace>, Entity<SettingsWindow>)> {
+    let embedded = cx.try_global::<EmbeddedSettings>()?;
+    let settings = embedded.settings.upgrade()?;
+    Some((embedded.host, settings))
+}
+
+pub fn existing_settings_view(cx: &App) -> Option<Entity<SettingsWindow>> {
+    find_embedded_settings(cx).map(|(_, settings)| settings)
+}
+
+fn host_window_for_settings(
+    workspace_handle: Option<WindowHandle<MultiWorkspace>>,
+    cx: &App,
+) -> Option<WindowHandle<MultiWorkspace>> {
+    if let Some(handle) = workspace_handle {
+        return Some(handle);
+    }
+    cx.active_window()
+        .and_then(|window| window.downcast::<MultiWorkspace>())
+        .or_else(|| {
+            cx.windows()
+                .into_iter()
+                .find_map(|window| window.downcast::<MultiWorkspace>())
+        })
+}
+
+fn settings_view_from_window(window: &Window, cx: &App) -> Option<Entity<SettingsWindow>> {
+    if let Some(settings) = window.root::<SettingsWindow>().flatten() {
+        return Some(settings);
+    }
+    let multi_workspace = window.root::<MultiWorkspace>().flatten()?;
+    multi_workspace
+        .read(cx)
+        .app_overlay()?
+        .downcast::<SettingsWindow>()
+        .ok()
+}
+
 fn open_settings_editor_with(
     workspace_handle: Option<WindowHandle<MultiWorkspace>>,
     cx: &mut App,
@@ -853,79 +899,52 @@ fn open_settings_editor_with(
 ) {
     telemetry::event!("Settings Viewed");
 
-    let existing_window = cx
-        .windows()
-        .into_iter()
-        .find_map(|window| window.downcast::<SettingsWindow>());
-
-    if let Some(existing_window) = existing_window {
-        existing_window
-            .update(cx, |settings_window, window, cx| {
-                settings_window.original_window = workspace_handle;
-
-                window.activate_window();
-                callback(settings_window, window, cx);
-            })
-            .ok();
-        return;
-    }
-
-    // We have to defer this to get the workspace off the stack.
+    // Defer so we are not updating MultiWorkspace while a child Workspace
+    // action handler is still on the stack.
     cx.defer(move |cx| {
-        let current_rem_size: f32 = theme_settings::ThemeSettings::get_global(cx)
-            .ui_font_size(cx)
-            .into();
-
-        let default_bounds = gpui::size(px(1440.), px(900.));
-        let default_rem_size = 16.0;
-        let scale_factor = current_rem_size / default_rem_size;
-        let scaled_bounds: gpui::Size<Pixels> = default_bounds.map(|axis| axis * scale_factor);
-
-        let app_id = ReleaseChannel::global(cx).app_id();
-        let window_decorations = match std::env::var("ZED_WINDOW_DECORATIONS") {
-            Ok(val) if val == "server" => gpui::WindowDecorations::Server,
-            Ok(val) if val == "client" => gpui::WindowDecorations::Client,
-            _ => match WorkspaceSettings::get_global(cx).window_decorations {
-                settings::WindowDecorations::Server => gpui::WindowDecorations::Server,
-                settings::WindowDecorations::Client => gpui::WindowDecorations::Client,
-            },
-        };
-
-        cx.open_window(
-            WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Zloppenheimer — Settings".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.0), px(12.0))),
-                }),
-                focus: true,
-                show: true,
-                is_movable: true,
-                kind: gpui::WindowKind::Normal,
-                window_background: cx.theme().window_background_appearance(),
-                app_id: Some(app_id.to_owned()),
-                window_decorations: Some(window_decorations),
-                window_min_size: Some(gpui::Size {
-                    // Do not make the settings window thinner than this,
-                    // otherwise, the space used to display the actual content
-                    // gets so small that certain sections grow too tall due
-                    // to intense text wrapping.
-                    width: SIDEBAR_WIDTH + CONTENT_MIN_WIDTH,
-                    height: px(240.0),
-                }),
-                window_bounds: Some(WindowBounds::centered(scaled_bounds, cx)),
-                ..Default::default()
-            },
-            |window, cx| {
-                let settings_window =
-                    cx.new(|cx| SettingsWindow::new(workspace_handle, window, cx));
-                settings_window.update(cx, |settings_window, cx| {
+        if let Some((host, settings)) = find_embedded_settings(cx) {
+            host.update(cx, |_, window, cx| {
+                window.activate_window();
+                settings.update(cx, |settings_window, cx| {
+                    settings_window.original_window = workspace_handle.or(Some(host));
                     callback(settings_window, window, cx);
                 });
+            })
+            .ok();
+            return;
+        }
 
-                settings_window
-            },
-        )
+        if let Some(existing_window) = cx
+            .windows()
+            .into_iter()
+            .find_map(|window| window.downcast::<SettingsWindow>())
+        {
+            existing_window
+                .update(cx, |settings_window, window, cx| {
+                    settings_window.original_window = workspace_handle;
+                    window.activate_window();
+                    callback(settings_window, window, cx);
+                })
+                .ok();
+            return;
+        }
+
+        let Some(host) = host_window_for_settings(workspace_handle, cx) else {
+            return;
+        };
+        host.update(cx, |multi_workspace, window, cx| {
+            let settings_window = cx.new(|cx| SettingsWindow::new(Some(host), true, window, cx));
+            settings_window.update(cx, |settings_window, cx| {
+                callback(settings_window, window, cx);
+                settings_window.focus_handle.clone().focus(window, cx);
+            });
+            cx.set_global(EmbeddedSettings {
+                host,
+                settings: settings_window.downgrade(),
+            });
+            multi_workspace.set_app_overlay(Some(settings_window.into()), cx);
+            window.activate_window();
+        })
         .log_err();
     });
 }
@@ -953,6 +972,7 @@ fn active_language_mut() -> Option<std::sync::RwLockWriteGuard<'static, Option<S
 pub struct SettingsWindow {
     title_bar: Option<Entity<PlatformTitleBar>>,
     original_window: Option<WindowHandle<MultiWorkspace>>,
+    embedded: bool,
     files: Vec<(SettingsUiFile, FocusHandle)>,
     worktree_root_dirs: HashMap<WorktreeId, String>,
     current_file: SettingsUiFile,
@@ -1016,6 +1036,8 @@ pub struct SettingsWindow {
     /// mouse, where `focus_visible` styling would otherwise be suppressed).
     pub(crate) external_agent_add_focus_handle: FocusHandle,
     skill_creator_page: Option<(Entity<pages::SkillCreatorPage>, Subscription)>,
+    _subscriptions: Vec<Subscription>,
+    add_connection_menu_handle: ui::PopoverMenuHandle<ui::ContextMenu>,
 }
 
 struct SearchDocument {
@@ -1210,7 +1232,7 @@ impl SettingsPageItem {
                         .pb(px(16.))
                         .text_size(px(14.))
                         .line_height(px(20.))
-                        .text_color(gpui::rgb(0xCDCBDA))
+                        .text_color(cx.theme().colors().text)
                         .child(ui::localized(header, cx))
                         .into_any_element();
                 }
@@ -1231,10 +1253,10 @@ impl SettingsPageItem {
                         .child(
                             v_flex()
                                 .group("setting-item")
-                                .px(px(18.))
-                                .bg(gpui::rgb(0x282B37))
+                                .px(px(16.))
+                                .bg(cx.theme().colors().surface_background)
                                 .border_x_1()
-                                .border_color(gpui::rgb(0x3C3F4C))
+                                .border_color(cx.theme().colors().border)
                                 .when(first_in_section, |this| {
                                     this.border_t_1().rounded_t(px(12.))
                                 })
@@ -1257,7 +1279,8 @@ impl SettingsPageItem {
                                             |this| this.py(px(13.)),
                                         )
                                         .when(!first_in_section, |this| {
-                                            this.border_t_1().border_color(gpui::rgb(0x383B48))
+                                            this.border_t_1()
+                                                .border_color(cx.theme().colors().border)
                                         }),
                                 ),
                         )
@@ -1500,7 +1523,7 @@ fn render_settings_item_layout(
                             div()
                                 .text_size(px(13.))
                                 .line_height(px(18.))
-                                .text_color(gpui::rgb(0xE0DEEA))
+                                .text_color(cx.theme().colors().text)
                                 .child(ui::localized(title, cx)),
                         )
                         .when_some(reset_fn, |this, reset_to_default| {
@@ -1527,11 +1550,11 @@ fn render_settings_item_layout(
                     div()
                         .text_size(px(12.))
                         .line_height(px(17.))
-                        .text_color(gpui::rgb(0xA1A4B8))
+                        .text_color(cx.theme().colors().text_muted)
                         .child(
                             Label::new(ui::localized(description, cx))
                                 .size(LabelSize::Custom(rems_from_px(12_f32)))
-                                .color(Color::Custom(gpui::rgb(0xA1A4B8).into()))
+                                .color(Color::Muted)
                                 .render_code_spans(),
                         ),
                 ),
@@ -1854,6 +1877,7 @@ impl SettingsUiFile {
 impl SettingsWindow {
     fn new(
         original_window: Option<WindowHandle<MultiWorkspace>>,
+        embedded: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1873,94 +1897,97 @@ impl SettingsWindow {
             editor.set_placeholder_text("Search settings…", window, cx);
             editor
         });
-        cx.subscribe(&search_bar, |this, _, event: &EditorEvent, cx| {
-            let EditorEvent::Edited { transaction_id: _ } = event else {
-                return;
-            };
+        let mut subscriptions = Vec::new();
+        subscriptions.push(
+            cx.subscribe(&search_bar, |this, _, event: &EditorEvent, cx| {
+                let EditorEvent::Edited { transaction_id: _ } = event else {
+                    return;
+                };
 
-            if this.opening_link {
-                this.opening_link = false;
-                return;
-            }
-            this.update_matches(cx);
-        })
-        .detach();
+                if this.opening_link {
+                    this.opening_link = false;
+                    return;
+                }
+                this.update_matches(cx);
+            }),
+        );
 
         let mut ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
-        cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
-            this.fetch_files(window, cx);
+        subscriptions.push(cx.observe_global_in::<SettingsStore>(
+            window,
+            move |this, window, cx| {
+                this.fetch_files(window, cx);
 
-            // Whenever settings are changed, it's possible that the changed
-            // settings affects the rendering of the `SettingsWindow`, like is
-            // the case with `ui_font_size`. When that happens, we need to
-            // instruct the `ListState` to re-measure the list items, as the
-            // list item heights may have changed depending on the new font
-            // size.
-            let new_ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
-            if new_ui_font_size != ui_font_size {
-                this.list_state.remeasure();
-                ui_font_size = new_ui_font_size;
-            }
+                let new_ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
+                if new_ui_font_size != ui_font_size {
+                    this.list_state.remeasure();
+                    ui_font_size = new_ui_font_size;
+                }
 
-            cx.notify();
-        })
-        .detach();
+                cx.notify();
+            },
+        ));
 
         use feature_flags::FeatureFlagAppExt as _;
         let mut last_is_staff = cx.is_staff();
-        cx.observe_global_in::<feature_flags::FeatureFlagStore>(window, move |this, window, cx| {
-            let is_staff = cx.is_staff();
-            if is_staff != last_is_staff {
-                last_is_staff = is_staff;
-                this.rebuild_pages(window, cx);
-            }
-        })
-        .detach();
+        subscriptions.push(cx.observe_global_in::<feature_flags::FeatureFlagStore>(
+            window,
+            move |this, window, cx| {
+                let is_staff = cx.is_staff();
+                if is_staff != last_is_staff {
+                    last_is_staff = is_staff;
+                    this.rebuild_pages(window, cx);
+                }
+            },
+        ));
 
-        cx.observe_global_in::<SkillIndex>(window, |this, _window, cx| {
-            if let Some(skill_index) = cx.try_global::<SkillIndex>() {
-                this.hidden_deleted_skill_directory_paths
-                    .retain(|directory_path| {
-                        skill_index
-                            .global_skills
-                            .iter()
-                            .chain(
-                                skill_index
-                                    .project_skills
-                                    .iter()
-                                    .flat_map(|group| group.skills.iter()),
-                            )
-                            .any(|skill| skill.directory_path.as_path() == directory_path.as_path())
-                    });
-            } else {
-                this.hidden_deleted_skill_directory_paths.clear();
-            }
-            cx.notify();
-        })
-        .detach();
+        subscriptions.push(
+            cx.observe_global_in::<SkillIndex>(window, |this, _window, cx| {
+                if let Some(skill_index) = cx.try_global::<SkillIndex>() {
+                    this.hidden_deleted_skill_directory_paths
+                        .retain(|directory_path| {
+                            skill_index
+                                .global_skills
+                                .iter()
+                                .chain(
+                                    skill_index
+                                        .project_skills
+                                        .iter()
+                                        .flat_map(|group| group.skills.iter()),
+                                )
+                                .any(|skill| {
+                                    skill.directory_path.as_path() == directory_path.as_path()
+                                })
+                        });
+                } else {
+                    this.hidden_deleted_skill_directory_paths.clear();
+                }
+                cx.notify();
+            }),
+        );
 
         let language_model_registry = language_model::LanguageModelRegistry::global(cx);
-        cx.subscribe(&language_model_registry, |_, _, _event, cx| {
+        subscriptions.push(cx.subscribe(&language_model_registry, |_, _, _event, cx| {
             cx.notify();
-        })
-        .detach();
+        }));
 
-        cx.on_window_closed(|cx, _window_id| {
-            if let Some(existing_window) = cx
-                .windows()
-                .into_iter()
-                .find_map(|window| window.downcast::<SettingsWindow>())
-                && cx.windows().len() == 1
-            {
-                cx.update_window(*existing_window, |_, window, _| {
-                    window.remove_window();
-                })
-                .ok();
+        if !embedded {
+            subscriptions.push(cx.on_window_closed(|cx, _window_id| {
+                if let Some(existing_window) = cx
+                    .windows()
+                    .into_iter()
+                    .find_map(|window| window.downcast::<SettingsWindow>())
+                    && cx.windows().len() == 1
+                {
+                    cx.update_window(*existing_window, |_, window, _| {
+                        window.remove_window();
+                    })
+                    .ok();
 
-                telemetry::event!("Settings Closed")
-            }
-        })
-        .detach();
+                    telemetry::event!("Settings Closed")
+                }
+            }));
+        }
 
         let app_state = AppState::global(cx);
         let workspaces: Vec<Entity<Workspace>> = app_state
@@ -1972,20 +1999,21 @@ impl SettingsWindow {
 
         for workspace in workspaces {
             let project = workspace.read(cx).project().clone();
-            cx.observe_release_in(&project, window, |this, _, window, cx| {
-                this.fetch_files(window, cx)
-            })
-            .detach();
-            cx.subscribe_in(&project, window, Self::handle_project_event)
-                .detach();
-            cx.observe_release_in(&workspace, window, |this, _, window, cx| {
-                this.fetch_files(window, cx)
-            })
-            .detach();
+            subscriptions.push(
+                cx.observe_release_in(&project, window, |this, _, window, cx| {
+                    this.fetch_files(window, cx)
+                }),
+            );
+            subscriptions.push(cx.subscribe_in(&project, window, Self::handle_project_event));
+            subscriptions.push(
+                cx.observe_release_in(&workspace, window, |this, _, window, cx| {
+                    this.fetch_files(window, cx)
+                }),
+            );
         }
 
         let this_weak = cx.weak_entity();
-        cx.observe_new::<Project>({
+        subscriptions.push(cx.observe_new::<Project>({
             let this_weak = this_weak.clone();
 
             move |_, window, cx| {
@@ -1995,55 +2023,55 @@ impl SettingsWindow {
                 };
 
                 this_weak
-                    .update(cx, |_, cx| {
+                    .update(cx, |this, cx| {
                         cx.defer_in(window, |settings_window, window, cx| {
                             settings_window.fetch_files(window, cx)
                         });
-                        cx.observe_release_in(&project, window, |_, _, window, cx| {
-                            cx.defer_in(window, |this, window, cx| this.fetch_files(window, cx));
-                        })
-                        .detach();
+                        this._subscriptions.push(cx.observe_release_in(
+                            &project,
+                            window,
+                            |_, _, window, cx| {
+                                cx.defer_in(window, |this, window, cx| {
+                                    this.fetch_files(window, cx)
+                                });
+                            },
+                        ));
 
-                        cx.subscribe_in(&project, window, Self::handle_project_event)
-                            .detach();
+                        this._subscriptions.push(cx.subscribe_in(
+                            &project,
+                            window,
+                            Self::handle_project_event,
+                        ));
                     })
                     .ok();
             }
-        })
-        .detach();
+        }));
 
         let handle = window.window_handle();
-        cx.observe_new::<Workspace>(move |workspace, _, cx| {
+        subscriptions.push(cx.observe_new::<Workspace>(move |workspace, _, cx| {
             let project = workspace.project().clone();
             let this_weak = this_weak.clone();
 
-            // We defer on the settings window (via `handle`) rather than using
-            // the workspace's window from observe_new. When window.defer() runs
-            // its callback, it calls handle.update() which temporarily removes
-            // that window from cx.windows. If we deferred on the workspace's
-            // window, then when fetch_files() tries to read ALL workspaces from
-            // the store (including the newly created one), it would fail with
-            // "window not found" because that workspace's window would be
-            // temporarily removed from cx.windows for the duration of our callback.
             handle
                 .update(cx, move |_, window, cx| {
                     window.defer(cx, move |window, cx| {
                         this_weak
                             .update(cx, |this, cx| {
                                 this.fetch_files(window, cx);
-                                cx.observe_release_in(&project, window, |this, _, window, cx| {
-                                    this.fetch_files(window, cx)
-                                })
-                                .detach();
+                                this._subscriptions.push(cx.observe_release_in(
+                                    &project,
+                                    window,
+                                    |this, _, window, cx| this.fetch_files(window, cx),
+                                ));
                             })
                             .ok();
                     });
                 })
                 .ok();
-        })
-        .detach();
+        }));
 
-        let title_bar = Some(cx.new(|cx| PlatformTitleBar::new("settings-title-bar", cx)));
+        let title_bar =
+            (!embedded).then(|| cx.new(|cx| PlatformTitleBar::new("settings-title-bar", cx)));
 
         let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(0.0)).measure_all();
         list_state.set_scroll_handler(|_, _, _| {});
@@ -2051,6 +2079,7 @@ impl SettingsWindow {
         let mut this = Self {
             title_bar,
             original_window,
+            embedded,
 
             worktree_root_dirs: HashMap::default(),
             files: vec![],
@@ -2107,6 +2136,8 @@ impl SettingsWindow {
             custom_agent_form: None,
             external_agent_add_focus_handle: cx.focus_handle(),
             skill_creator_page: None,
+            _subscriptions: subscriptions,
+            add_connection_menu_handle: PopoverMenuHandle::default(),
         };
 
         this.fetch_files(window, cx);
@@ -2125,6 +2156,43 @@ impl SettingsWindow {
         });
 
         this
+    }
+
+    pub fn open_add_connection_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_connection_menu_handle.show(window, cx);
+    }
+
+    pub fn hide_add_connection_menu(&mut self, cx: &mut Context<Self>) {
+        self.add_connection_menu_handle.hide(cx);
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        telemetry::event!("Settings Closed");
+        if self.embedded {
+            // App::defer, not Window::defer: the click is already inside this
+            // window's update, and Window::defer re-enters it so the host
+            // update cannot take the window.
+            let host = self
+                .original_window
+                .or_else(|| window.window_handle().downcast::<MultiWorkspace>());
+            cx.defer(move |cx| {
+                if cx.has_global::<EmbeddedSettings>() {
+                    cx.remove_global::<EmbeddedSettings>();
+                }
+                if let Some(host) = host {
+                    host.update(cx, |multi_workspace, window, cx| {
+                        multi_workspace.set_app_overlay(None, cx);
+                        multi_workspace
+                            .workspace()
+                            .focus_handle(cx)
+                            .focus(window, cx);
+                    })
+                    .log_err();
+                }
+            });
+        } else {
+            window.remove_window();
+        }
     }
 
     fn clear_search(&mut self, window: &mut Window, cx: &mut Context<SettingsWindow>) {
@@ -3118,10 +3186,10 @@ impl SettingsWindow {
             .rounded(px(7.))
             .bg(cx.theme().colors().elevated_surface_background)
             .border_1()
-            .border_color(gpui::rgb(0x414453))
+            .border_color(cx.theme().colors().border)
             .child(
                 Icon::new(IconName::MagnifyingGlass)
-                    .size(IconSize::Custom(rems_from_px(15_f32)))
+                    .size(IconSize::Custom(rems_from_px(16_f32)))
                     .color(Color::Muted),
             )
             .child(EditorElement::new(
@@ -3294,12 +3362,16 @@ impl SettingsWindow {
                     .size(ButtonSize::None)
                     .full_width()
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(original_window) = this.original_window {
-                            original_window.update(cx, |_, window, _| window.activate_window()).log_err();
+                        if !this.embedded
+                            && let Some(original_window) = this.original_window
+                        {
+                            original_window
+                                .update(cx, |_, window, _| window.activate_window())
+                                .log_err();
                         }
-                        window.remove_window();
+                        this.close_settings(window, cx);
                     }))
-                    .child(div().w_full().text_left().px(px(11.)).text_size(px(14.)).line_height(px(18.)).text_color(gpui::rgb(0xCFCDDE)).child(format!("← {}", ui::localized("Back to app", cx))))
+                    .child(div().w_full().text_left().px(px(12.)).text_size(px(14.)).line_height(px(18.)).text_color(cx.theme().colors().text).child(format!("← {}", ui::localized("Back to app", cx))))
             )
             .child(self.render_search(window, cx))
             .child(
@@ -3315,8 +3387,33 @@ impl SettingsWindow {
                     .child(
                         uniform_list(
                             "settings-ui-nav-bar",
-                            visible_count,
+                            visible_count + NAV_ACTION_ENTRIES.len(),
                             cx.processor(move |this, range: Range<usize>, _, cx| {
+                                let action_rows = range
+                                    .clone()
+                                    .filter_map(|index| index.checked_sub(visible_count))
+                                    .filter_map(|action_index| {
+                                        let (label, build_action) =
+                                            NAV_ACTION_ENTRIES.get(action_index)?;
+                                        let action = build_action();
+                                        Some(
+                                            TreeViewItem::new(
+                                                ("settings-ui-navbar-action", action_index),
+                                                ui::localized(label, cx),
+                                            )
+                                            .navigation_style(true)
+                                            .root_item(true)
+                                            .end_slot(KeyBinding::for_action(action.as_ref(), cx))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.dispatch_nav_action(
+                                                    action.boxed_clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
                                 this.visible_navbar_entries()
                                     .skip(range.start)
                                     .take(range.len())
@@ -3329,6 +3426,12 @@ impl SettingsWindow {
                                         .track_focus(&entry.focus_handle)
                                         .root_item(entry.is_root)
                                         .toggle_state(this.is_navbar_entry_selected(entry_index))
+                                        .when(entry.title == "Keymap", |item| {
+                                            item.end_slot(KeyBinding::for_action(
+                                                &OpenKeymap,
+                                                cx,
+                                            ))
+                                        })
                                         .when(entry.is_root, |item| {
                                             item.expanded(entry.expanded || this.has_query)
                                                 .on_toggle(cx.listener(
@@ -3381,7 +3484,7 @@ impl SettingsWindow {
                     )
                     .vertical_scrollbar_for(&self.navbar_scroll_handle, window, cx),
             )
-            .child(div().h(px(1.)).flex_none().bg(gpui::rgb(0x383A48)))
+            .child(div().h(px(1.)).flex_none().bg(cx.theme().colors().border))
             .children([
                 ("Themes…", Box::new(zed_actions::theme_selector::Toggle::default()) as Box<dyn Action>),
                 ("Icon Themes…", Box::new(zed_actions::icon_theme_selector::Toggle::default()) as Box<dyn Action>),
@@ -3390,7 +3493,7 @@ impl SettingsWindow {
                 ButtonLike::new(label).full_width().size(ButtonSize::None).height(px(36.).into())
                     .corner_radius(px(6.)).tab_index(0_isize)
                     .child(h_flex().w_full().px(px(11.)).justify_between()
-                        .child(div().text_size(px(14.)).line_height(px(20.)).text_color(gpui::rgb(0xBFC1D1)).child(ui::localized(label, cx)))
+                        .child(div().text_size(px(14.)).line_height(px(20.)).text_color(cx.theme().colors().text_muted).child(ui::localized(label, cx)))
                         .child(KeyBinding::for_action(action.as_ref(), cx)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(original_window) = this.original_window {
@@ -3399,7 +3502,7 @@ impl SettingsWindow {
                                 window.activate_window();
                                 window.dispatch_action(action, cx);
                             }).log_err();
-                            window.remove_window();
+                            this.close_settings(window, cx);
                         } else {
                             window.dispatch_action(action.boxed_clone(), cx);
                         }
@@ -3692,7 +3795,7 @@ impl SettingsWindow {
             .aria_label("Settings Content")
             .size_full()
             .when(card_layout, |this| {
-                this.max_w(px(948.)).mx_auto().px(px(24.))
+                this.max_w(px(900.)).mx_auto().pt(px(36.)).pb(px(28.))
             });
 
         let has_active_search = !self.search_bar.read(cx).is_empty(cx);
@@ -3728,7 +3831,7 @@ impl SettingsWindow {
                                             div()
                                                 .text_size(px(26.))
                                                 .line_height(px(34.))
-                                                .text_color(gpui::rgb(0xECECF2))
+                                                .text_color(cx.theme().colors().text)
                                                 .child(ui::localized(title, cx)),
                                         )
                                     } else {
@@ -3891,10 +3994,17 @@ impl SettingsWindow {
                 .is_some_and(|page| page.title == "Keymap")
         {
             if self.embedded_keymap.is_none() {
-                let workspace = self
-                    .original_window
-                    .and_then(|window| window.read(cx).ok())
-                    .map(|window| window.workspace().downgrade());
+                // When settings are drawn inside the workspace window, that window is
+                // mid-draw and cannot be read through its handle, so use its root view.
+                let workspace = window
+                    .root::<MultiWorkspace>()
+                    .flatten()
+                    .map(|multi_workspace| multi_workspace.read(cx).workspace().downgrade())
+                    .or_else(|| {
+                        self.original_window
+                            .and_then(|window| window.read(cx).ok())
+                            .map(|window| window.workspace().downgrade())
+                    });
                 if let Some(workspace) = workspace {
                     self.embedded_keymap =
                         Some(cx.new(|cx| {
@@ -4131,7 +4241,7 @@ impl SettingsWindow {
                         div().pr_2().pb_1().child(
                             Button::new("manage-trust", "Manage Trust")
                                 .style(ButtonStyle::Tinted(ui::TintColor::Warning))
-                                .on_click(cx.listener(move |_this, _, window, cx| {
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     if let Some(original_window) = original_window {
                                         original_window
                                             .update(cx, |multi_workspace, window, cx| {
@@ -4146,8 +4256,7 @@ impl SettingsWindow {
                                             })
                                             .log_err();
                                     }
-                                    // Close the settings window
-                                    window.remove_window();
+                                    this.close_settings(window, cx);
                                 })),
                         ),
                     )
@@ -4246,10 +4355,10 @@ impl SettingsWindow {
             .track_focus(&self.content_focus_handle.focus_handle(cx))
             .pt_6()
             .gap_4()
-            .when(card_layout, |this| this.pt(px(36.)).gap_0())
+            .when(card_layout, |this| this.pt_0().gap_0())
             .flex_1()
             .min_w_0()
-            .bg(gpui::rgb(0x232530))
+            .bg(cx.theme().colors().background)
             .child(
                 v_flex()
                     .px_8()
@@ -4300,7 +4409,7 @@ impl SettingsWindow {
                     })
                     .ok();
 
-                window.remove_window();
+                self.close_settings(window, cx);
             }
             SettingsUiFile::Project((worktree_id, path)) => {
                 let settings_path = path.join(paths::local_settings_file_relative_path());
@@ -4384,7 +4493,7 @@ impl SettingsWindow {
                     })
                     .ok();
 
-                window.remove_window();
+                self.close_settings(window, cx);
             }
             SettingsUiFile::Server(_) => {
                 // Server files are not editable
@@ -4708,103 +4817,106 @@ impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = theme_settings::setup_ui_font(window, cx);
         if let Some(title_bar) = &self.title_bar {
+            let muted = cx.theme().colors().text_muted;
             title_bar.update(cx, |title_bar, _| {
                 title_bar.set_children([div()
                     .w_full()
                     .text_center()
                     .text_size(px(12.))
                     .line_height(px(18.))
-                    .text_color(gpui::rgb(0xA6A8B8))
+                    .text_color(muted)
                     .child("Zloppenheimer")
                     .into_any_element()]);
             });
         }
 
-        client_side_decorations(
-            v_flex()
-                .text_color(cx.theme().colors().text)
-                .size_full()
-                .children(self.title_bar.clone())
-                .child(
-                    div()
-                        .id("settings-window")
-                        .key_context("SettingsWindow")
-                        .track_focus(&self.focus_handle)
-                        .on_action(cx.listener(|this, _: &OpenCurrentFile, window, cx| {
-                            this.open_current_settings_file(window, cx);
-                        }))
-                        .on_action(|_: &Minimize, window, _cx| {
-                            window.minimize_window();
-                        })
-                        .on_action(cx.listener(|this, _: &search::FocusSearch, window, cx| {
-                            this.search_bar.focus_handle(cx).focus(window, cx);
-                        }))
-                        .on_action(cx.listener(|this, _: &ToggleFocusNav, window, cx| {
-                            if this
-                                .navbar_focus_handle
-                                .focus_handle(cx)
-                                .contains_focused(window, cx)
-                            {
-                                this.open_and_scroll_to_navbar_entry(
-                                    this.navbar_entry,
-                                    None,
-                                    true,
-                                    window,
-                                    cx,
-                                );
-                            } else {
-                                this.focus_and_scroll_to_nav_entry(this.navbar_entry, window, cx);
-                            }
-                        }))
-                        .on_action(cx.listener(
-                            |this, FocusFile(file_index): &FocusFile, window, cx| {
-                                this.focus_file_at_index(*file_index as usize, window, cx);
-                            },
-                        ))
-                        .on_action(cx.listener(|this, _: &FocusNextFile, window, cx| {
-                            let next_index = usize::min(
-                                this.focused_file_index(window, cx) + 1,
-                                this.files.len().saturating_sub(1),
+        let content = v_flex()
+            .text_color(cx.theme().colors().text)
+            .size_full()
+            .children(self.title_bar.clone())
+            .child(
+                div()
+                    .id("settings-window")
+                    .key_context("SettingsWindow")
+                    .track_focus(&self.focus_handle)
+                    .on_action(cx.listener(|this, _: &OpenCurrentFile, window, cx| {
+                        this.open_current_settings_file(window, cx);
+                    }))
+                    .on_action(|_: &Minimize, window, _cx| {
+                        window.minimize_window();
+                    })
+                    .on_action(cx.listener(|this, _: &search::FocusSearch, window, cx| {
+                        this.search_bar.focus_handle(cx).focus(window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &ToggleFocusNav, window, cx| {
+                        if this
+                            .navbar_focus_handle
+                            .focus_handle(cx)
+                            .contains_focused(window, cx)
+                        {
+                            this.open_and_scroll_to_navbar_entry(
+                                this.navbar_entry,
+                                None,
+                                true,
+                                window,
+                                cx,
                             );
-                            this.focus_file_at_index(next_index, window, cx);
-                        }))
-                        .on_action(cx.listener(|this, _: &FocusPreviousFile, window, cx| {
-                            let prev_index = this.focused_file_index(window, cx).saturating_sub(1);
-                            this.focus_file_at_index(prev_index, window, cx);
-                        }))
-                        .on_action(cx.listener(|this, _: &menu::SelectNext, window, cx| {
-                            if this
-                                .search_bar
-                                .focus_handle(cx)
-                                .contains_focused(window, cx)
-                            {
-                                this.focus_and_scroll_to_first_visible_nav_entry(window, cx);
-                            } else {
-                                window.focus_next(cx);
-                            }
-                        }))
-                        .on_action(|_: &menu::SelectPrevious, window, cx| {
-                            window.focus_prev(cx);
-                        })
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .min_h_0()
-                        .font(ui_font)
-                        .bg(cx.theme().colors().background)
-                        .text_color(cx.theme().colors().text)
-                        .when(!cfg!(target_os = "macos"), |this| {
-                            this.border_t_1().border_color(cx.theme().colors().border)
-                        })
-                        .child(self.render_nav(window, cx))
-                        .child(self.render_page(window, cx)),
-                )
-                .when(self.custom_agent_form.is_some(), |this| {
-                    this.child(pages::render_custom_agent_modal(self, window, cx))
-                }),
-            window,
-            cx,
-        )
+                        } else {
+                            this.focus_and_scroll_to_nav_entry(this.navbar_entry, window, cx);
+                        }
+                    }))
+                    .on_action(cx.listener(
+                        |this, FocusFile(file_index): &FocusFile, window, cx| {
+                            this.focus_file_at_index(*file_index as usize, window, cx);
+                        },
+                    ))
+                    .on_action(cx.listener(|this, _: &FocusNextFile, window, cx| {
+                        let next_index = usize::min(
+                            this.focused_file_index(window, cx) + 1,
+                            this.files.len().saturating_sub(1),
+                        );
+                        this.focus_file_at_index(next_index, window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &FocusPreviousFile, window, cx| {
+                        let prev_index = this.focused_file_index(window, cx).saturating_sub(1);
+                        this.focus_file_at_index(prev_index, window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &menu::SelectNext, window, cx| {
+                        if this
+                            .search_bar
+                            .focus_handle(cx)
+                            .contains_focused(window, cx)
+                        {
+                            this.focus_and_scroll_to_first_visible_nav_entry(window, cx);
+                        } else {
+                            window.focus_next(cx);
+                        }
+                    }))
+                    .on_action(|_: &menu::SelectPrevious, window, cx| {
+                        window.focus_prev(cx);
+                    })
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .font(ui_font)
+                    .bg(cx.theme().colors().background)
+                    .text_color(cx.theme().colors().text)
+                    .when(!cfg!(target_os = "macos"), |this| {
+                        this.border_t_1().border_color(cx.theme().colors().border)
+                    })
+                    .child(self.render_nav(window, cx))
+                    .child(self.render_page(window, cx)),
+            )
+            .when(self.custom_agent_form.is_some(), |this| {
+                this.child(pages::render_custom_agent_modal(self, window, cx))
+            });
+
+        if self.embedded {
+            content.into_any_element()
+        } else {
+            client_side_decorations(content, window, cx).into_any_element()
+        }
     }
 }
 
@@ -4891,7 +5003,7 @@ fn update_settings_file(
     match file {
         SettingsUiFile::Project((worktree_id, rel_path)) => {
             let rel_path = rel_path.join(paths::local_settings_file_relative_path());
-            let Some(settings_window) = window.root::<SettingsWindow>().flatten() else {
+            let Some(settings_window) = settings_view_from_window(window, cx) else {
                 anyhow::bail!("No settings window found");
             };
 
@@ -5115,14 +5227,14 @@ fn render_text_field<T: From<String> + Into<String> + AsRef<str> + Clone>(
                 div()
                     .text_size(px(11.))
                     .line_height(px(14.))
-                    .text_color(gpui::rgb(0xA1A4B8))
+                    .text_color(cx.theme().colors().text_muted)
                     .child(initial_text.unwrap_or_default()),
             )
             .child(
                 ButtonLike::new("change-projectless-task-folder")
                     .height(px(30.).into())
                     .corner_radius(px(6.))
-                    .background(gpui::rgb(0x343744).into())
+                    .background(cx.theme().colors().element_background.into())
                     .tab_index(0_isize)
                     .aria_label("Change projectless task folder")
                     .child(
@@ -5299,7 +5411,7 @@ impl AppChoice for settings::AppLanguage {
 impl AppChoice for settings::FileOpenDestination {
     fn choices() -> &'static [(&'static str, Self)] {
         &[
-            ("In app", Self::Internal),
+            ("Zloppenheimer", Self::Internal),
             ("Default application", Self::System),
         ]
     }
@@ -5324,33 +5436,7 @@ fn render_app_choice<T: AppChoice + Send>(
         .unwrap_or_default();
     PopoverMenu::new(title)
         .trigger(
-            ButtonLike::new(title)
-                .size(ButtonSize::None)
-                .height(px(30.).into())
-                .corner_radius(px(7.))
-                .background(gpui::rgb(0x2C2F3B).into())
-                .disabled(disabled)
-                .aria_label(title)
-                .custom_style(|this| {
-                    this.px(px(11.))
-                        .border_1()
-                        .border_color(gpui::rgb(0x454856))
-                })
-                .child(
-                    h_flex()
-                        .gap(px(10.))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .line_height(px(16.))
-                                .text_color(gpui::rgb(0xD3D1DF))
-                                .child(ui::localized(label, cx)),
-                        )
-                        .child(
-                            Icon::new(IconName::ChevronDown)
-                                .size(IconSize::Custom(rems_from_px(13_f32))),
-                        ),
-                ),
+            paper_dropdown_trigger(title, ui::localized(label, cx), disabled, cx).aria_label(title),
         )
         .anchor(gpui::Anchor::TopRight)
         .menu(move |window, cx| {
@@ -5394,37 +5480,17 @@ fn render_model_speed(
         .is_some_and(|model| model.model.supports_fast_mode());
     PopoverMenu::new("default-speed-menu")
         .trigger(
-            ButtonLike::new("default-speed")
-                .size(ButtonSize::None)
-                .height(px(30.).into())
-                .corner_radius(px(7.))
-                .background(gpui::rgb(0x2C2F3B).into())
-                .custom_style(|this| {
-                    this.px(px(11.))
-                        .border_1()
-                        .border_color(gpui::rgb(0x454856))
-                })
-                .aria_label(title)
-                .disabled(!supports_fast)
-                .child(
-                    h_flex()
-                        .gap(px(10.))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .line_height(px(16.))
-                                .text_color(gpui::rgb(0xD3D1DF))
-                                .child(if value == language_model::Speed::Fast {
-                                    "Fast"
-                                } else {
-                                    "Standard"
-                                }),
-                        )
-                        .child(
-                            Icon::new(IconName::ChevronDown)
-                                .size(IconSize::Custom(rems_from_px(13_f32))),
-                        ),
-                ),
+            paper_dropdown_trigger(
+                "default-speed",
+                if value == language_model::Speed::Fast {
+                    "Fast"
+                } else {
+                    "Standard"
+                },
+                !supports_fast,
+                cx,
+            )
+            .aria_label(title),
         )
         .anchor(gpui::Anchor::TopRight)
         .menu(move |window, cx| {
@@ -5472,7 +5538,7 @@ fn render_terminal_location(
         .gap(px(4.))
         .p(px(3.))
         .rounded(px(7.))
-        .bg(gpui::rgb(0x22242E))
+        .bg(cx.theme().colors().tab_bar_background)
         .children(
             [
                 ("Bottom", settings::TerminalDockPosition::Bottom),
@@ -5490,7 +5556,7 @@ fn render_terminal_location(
                     .tab_index(0_isize)
                     .aria_label(format!("{title}: {label}"))
                     .background(if value == location {
-                        gpui::rgb(0x3A3548).into()
+                        cx.theme().colors().element_hover.into()
                     } else {
                         gpui::transparent_black()
                     })
@@ -5499,11 +5565,11 @@ fn render_terminal_location(
                             .px(px(11.))
                             .text_size(px(12.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(if value == location {
-                                0xE0D4EF
+                            .text_color(if value == location {
+                                cx.theme().colors().text_accent
                             } else {
-                                0xA1A4B8
-                            }))
+                                cx.theme().colors().text_muted
+                            })
                             .child(ui::localized(label, cx)),
                     )
                     .on_click(move |_, window, cx| {
@@ -5607,6 +5673,39 @@ fn render_editable_number_field<T: NumberFieldType + Send + Sync>(
         .into_any_element()
 }
 
+fn paper_dropdown_trigger(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    disabled: bool,
+    cx: &App,
+) -> ButtonLike {
+    let border = cx.theme().colors().border;
+    ButtonLike::new(id)
+        .size(ButtonSize::None)
+        .height(px(30.).into())
+        .corner_radius(px(7.))
+        .background(cx.theme().colors().surface_background)
+        .disabled(disabled)
+        .custom_style(move |this| this.px(px(11.)).border_1().border_color(border))
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(cx.theme().colors().text)
+                        .child(label.into()),
+                )
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(IconSize::Custom(rems_from_px(13_f32)))
+                        .color(Color::Muted),
+                ),
+        )
+}
+
 fn render_dropdown<T>(
     field: SettingField<T>,
     file: SettingsUiFile,
@@ -5629,32 +5728,64 @@ where
     let (current_value, disabled) = current_value
         .map(|current_value| (*current_value.value, current_value.disabled))
         .unwrap_or((variants()[0], false));
+    let current_label = labels()
+        .get(
+            variants()
+                .iter()
+                .position(|variant| *variant == current_value)
+                .unwrap_or(0),
+        )
+        .copied()
+        .unwrap_or_default();
+    let label = if should_do_titlecase {
+        current_label.to_title_case()
+    } else {
+        current_label.to_string()
+    };
 
-    EnumVariantDropdown::new("dropdown", current_value, variants(), labels(), {
-        move |value, window, cx| {
-            if value == current_value {
-                return;
-            }
-            update_settings_file(
-                file.clone(),
-                field.json_path,
-                window,
-                cx,
-                move |settings, app| {
-                    (field.write)(settings, Some(value), app);
-                },
-            )
-            .log_err(); // todo(settings_ui) don't log err
-        }
-    })
-    .aria_label(title)
-    .when(!description.is_empty(), |this| {
-        this.aria_description(description)
-    })
-    .disabled(disabled)
-    .tab_index(0)
-    .title_case(should_do_titlecase)
-    .into_any_element()
+    PopoverMenu::new(title)
+        .trigger(
+            paper_dropdown_trigger(title, label, disabled, cx)
+                .aria_label(title)
+                .when(!description.is_empty(), |this| {
+                    this.aria_description(description)
+                })
+                .tab_index(0_isize),
+        )
+        .anchor(gpui::Anchor::TopRight)
+        .menu(move |window, cx| {
+            let file = file.clone();
+            Some(ContextMenu::build(window, cx, move |menu, _, cx| {
+                variants().iter().zip(labels().iter()).fold(
+                    menu.dropdown_style(px(220.)),
+                    |menu, (variant, label)| {
+                        let file = file.clone();
+                        let variant = *variant;
+                        let display: SharedString = if should_do_titlecase {
+                            label.to_title_case().into()
+                        } else {
+                            ui::localized(*label, cx)
+                        };
+                        menu.entry(display, None, move |window, cx| {
+                            if variant == current_value {
+                                return;
+                            }
+                            update_settings_file(
+                                file.clone(),
+                                field.json_path,
+                                window,
+                                cx,
+                                move |settings, app| {
+                                    (field.write)(settings, Some(variant), app);
+                                },
+                            )
+                            .log_err();
+                        })
+                    },
+                )
+            }))
+        })
+        .into_any_element()
 }
 
 fn render_picker_trigger_button(id: SharedString, label: SharedString) -> Button {
@@ -5891,6 +6022,7 @@ pub mod test {
             Self {
                 title_bar: None,
                 original_window: None,
+                embedded: false,
                 worktree_root_dirs: HashMap::default(),
                 files: Vec::default(),
                 current_file: SettingsUiFile::User,
@@ -5942,6 +6074,8 @@ pub mod test {
                 custom_agent_form: None,
                 external_agent_add_focus_handle: cx.focus_handle(),
                 skill_creator_page: None,
+                _subscriptions: Vec::new(),
+                add_connection_menu_handle: PopoverMenuHandle::default(),
             }
         }
     }
@@ -6034,6 +6168,7 @@ pub mod test {
         let mut settings_window = SettingsWindow {
             title_bar: None,
             original_window: None,
+            embedded: false,
             worktree_root_dirs: HashMap::default(),
             files: Vec::default(),
             current_file: crate::SettingsUiFile::User,
@@ -6085,6 +6220,8 @@ pub mod test {
             custom_agent_form: None,
             external_agent_add_focus_handle: cx.focus_handle(),
             skill_creator_page: None,
+            _subscriptions: Vec::new(),
+            add_connection_menu_handle: PopoverMenuHandle::default(),
         };
 
         settings_window.build_filter_table();
@@ -6480,8 +6617,9 @@ pub mod test {
 
         cx.run_until_parked();
 
-        let (settings_window, cx) = cx
-            .add_window_view(|window, cx| SettingsWindow::new(Some(workspace2_handle), window, cx));
+        let (settings_window, cx) = cx.add_window_view(|window, cx| {
+            SettingsWindow::new(Some(workspace2_handle), false, window, cx)
+        });
 
         cx.run_until_parked();
 
@@ -6612,8 +6750,9 @@ pub mod test {
 
         cx.run_until_parked();
 
-        let (settings_window, cx) = cx
-            .add_window_view(|window, cx| SettingsWindow::new(Some(workspace1_handle), window, cx));
+        let (settings_window, cx) = cx.add_window_view(|window, cx| {
+            SettingsWindow::new(Some(workspace1_handle), false, window, cx)
+        });
 
         cx.run_until_parked();
 
@@ -6824,8 +6963,9 @@ pub mod test {
 
         cx.run_until_parked();
 
-        let (settings_window, cx) = cx
-            .add_window_view(|window, cx| SettingsWindow::new(Some(workspace_handle), window, cx));
+        let (settings_window, cx) = cx.add_window_view(|window, cx| {
+            SettingsWindow::new(Some(workspace_handle), false, window, cx)
+        });
 
         cx.run_until_parked();
 
@@ -6934,8 +7074,9 @@ pub mod test {
 
         cx.run_until_parked();
 
-        let (settings_window, cx) = cx
-            .add_window_view(|window, cx| SettingsWindow::new(Some(workspace_handle), window, cx));
+        let (settings_window, cx) = cx.add_window_view(|window, cx| {
+            SettingsWindow::new(Some(workspace_handle), false, window, cx)
+        });
 
         cx.run_until_parked();
 
@@ -7034,27 +7175,21 @@ pub mod test {
         cx.run_until_parked();
 
         let settings_window = cx
-            .update(|_, cx| {
-                cx.windows()
-                    .into_iter()
-                    .find_map(|window| window.downcast::<SettingsWindow>())
-            })
-            .expect("dispatching agent::OpenSkillCreator should open the settings window");
+            .update(|_, cx| existing_settings_view(cx))
+            .expect("dispatching agent::OpenSkillCreator should open settings");
 
-        settings_window
-            .read_with(cx, |settings_window, _| {
-                let titles: Vec<_> = settings_window
-                    .sub_page_stack
-                    .iter()
-                    .map(|sub_page| sub_page.link.title.to_string())
-                    .collect();
-                assert_eq!(
-                    titles,
-                    ["Skills", "Create Skill"],
-                    "skill creator should be pushed on top of the skills page"
-                );
-            })
-            .unwrap();
+        settings_window.read_with(cx, |settings_window, _| {
+            let titles: Vec<_> = settings_window
+                .sub_page_stack
+                .iter()
+                .map(|sub_page| sub_page.link.title.to_string())
+                .collect();
+            assert_eq!(
+                titles,
+                ["Skills", "Create Skill"],
+                "skill creator should be pushed on top of the skills page"
+            );
+        });
     }
 }
 

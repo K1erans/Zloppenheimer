@@ -314,7 +314,7 @@ impl AgentDiffPane {
                     .px(px(16.))
                     .gap(px(10.))
                     .border_b_1()
-                    .border_color(gpui::rgb(0x414451))
+                    .border_color(cx.theme().colors().border)
                     .child(
                         ButtonLike::new("return-to-thread")
                             .size(ButtonSize::None)
@@ -322,14 +322,14 @@ impl AgentDiffPane {
                                 div()
                                     .text_size(px(12.))
                                     .line_height(px(16.))
-                                    .text_color(gpui::rgb(0xDDCBEA))
+                                    .text_color(cx.theme().colors().text_accent)
                                     .child("← Thread"),
                             )
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(ToggleFocus.boxed_clone(), cx)
                             }),
                     )
-                    .child(div().w(px(1.)).h(px(18.)).bg(gpui::rgb(0x464957)))
+                    .child(div().w(px(1.)).h(px(18.)).bg(cx.theme().colors().border))
                     .child(Icon::new(IconName::File).size(IconSize::Small))
                     .child(
                         PopoverMenu::new("review-file-picker")
@@ -341,7 +341,7 @@ impl AgentDiffPane {
                                         div()
                                             .text_size(px(12.))
                                             .line_height(px(16.))
-                                            .text_color(gpui::rgb(0xD9DCE8))
+                                            .text_color(cx.theme().colors().text)
                                             .child(path_label),
                                     )
                                     .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
@@ -370,14 +370,14 @@ impl AgentDiffPane {
                         div()
                             .text_size(px(12.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xA6C8B0))
+                            .text_color(cx.theme().colors().version_control_added)
                             .child(format!("+{}", stats.lines_added)),
                     )
                     .child(
                         div()
                             .text_size(px(12.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xD9A8B0))
+                            .text_color(cx.theme().colors().version_control_deleted)
                             .child(format!("−{}", stats.lines_removed)),
                     )
                     .child(
@@ -385,14 +385,14 @@ impl AgentDiffPane {
                             .flex_1()
                             .text_size(px(11.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xAEB4C7))
+                            .text_color(cx.theme().colors().text_muted)
                             .child("Agent's changes"),
                     )
                     .child(
                         div()
                             .text_size(px(12.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xB7B8C7))
+                            .text_color(cx.theme().colors().icon)
                             .child(format!("{} / {file_count}", active_index + 1)),
                     )
                     .child(
@@ -422,7 +422,7 @@ impl AgentDiffPane {
                             })),
                     )
                     .child(DiffStyleControls::new(self.editor.clone()).labeled())
-                    .child(div().w(px(1.)).h(px(18.)).bg(gpui::rgb(0x464957)))
+                    .child(div().w(px(1.)).h(px(18.)).bg(cx.theme().colors().border))
                     .child(
                         IconButton::new("review-terminal", IconName::Terminal)
                             .height(px(28.).into())
@@ -451,11 +451,11 @@ impl AgentDiffPane {
             .when(split, |this| {
                 this.child(
                     h_flex()
-                        .h(px(28.))
+                        .h(px(22.))
                         .flex_none()
-                        .bg(gpui::rgb(0x292C38))
+                        .bg(cx.theme().colors().surface_background)
                         .border_b_1()
-                        .border_color(gpui::rgb(0x414451))
+                        .border_color(cx.theme().colors().border)
                         .children(
                             [
                                 ("Original", "Before this response"),
@@ -470,20 +470,20 @@ impl AgentDiffPane {
                                     .px(px(14.))
                                     .justify_between()
                                     .when(index == 1, |this| {
-                                        this.border_l_1().border_color(gpui::rgb(0x414451))
+                                        this.border_l_1().border_color(cx.theme().colors().border)
                                     })
                                     .child(
                                         div()
                                             .text_size(px(12.))
                                             .line_height(px(16.))
-                                            .text_color(gpui::rgb(0xD9DCE8))
+                                            .text_color(cx.theme().colors().text)
                                             .child(title),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(11.))
                                             .line_height(px(16.))
-                                            .text_color(gpui::rgb(0xAEB4C7))
+                                            .text_color(cx.theme().colors().text_muted)
                                             .child(detail),
                                     )
                             }),
@@ -498,13 +498,13 @@ impl AgentDiffPane {
                     .px(px(24.))
                     .gap(px(24.))
                     .border_t_1()
-                    .border_color(gpui::rgb(0x414451))
+                    .border_color(cx.theme().colors().border)
                     .child(
                         div()
                             .flex_1()
                             .text_size(px(12.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xAEB4C7))
+                            .text_color(cx.theme().colors().text_muted)
                             .child(format!(
                                 "{hunk_count} {} in this file",
                                 if hunk_count == 1 { "change" } else { "changes" }
@@ -522,11 +522,11 @@ impl AgentDiffPane {
                                         div()
                                             .text_size(px(12.))
                                             .line_height(px(16.))
-                                            .text_color(gpui::rgb(if next {
-                                                0xD3C6E0
+                                            .text_color(if next {
+                                                cx.theme().colors().text_accent
                                             } else {
-                                                0xAEB4C7
-                                            }))
+                                                cx.theme().colors().text_muted
+                                            })
                                             .child(label),
                                     )
                                     .on_click(move |_, window, cx| {

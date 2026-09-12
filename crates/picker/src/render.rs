@@ -114,7 +114,7 @@ impl<D: PickerDelegate> Picker<D> {
                 .gap(px(9.))
                 .flex_none()
                 .border_b_1()
-                .border_color(gpui::rgb(0x464354))
+                .border_color(cx.theme().colors().border)
                 .child(
                     Icon::new(IconName::MagnifyingGlass)
                         .size(IconSize::Custom(rems_from_px(16_f32)))
@@ -194,9 +194,9 @@ impl<D: PickerDelegate> Picker<D> {
             .when(self.delegate.dropdown_style(), |this| {
                 this.p(px(6.))
                     .rounded(px(10.))
-                    .bg(gpui::rgb(0x292C39))
+                    .bg(cx.theme().colors().elevated_surface_background)
                     .border_1()
-                    .border_color(gpui::rgb(0x4B475B))
+                    .border_color(cx.theme().colors().border)
                     .shadow(vec![
                         gpui::BoxShadow::new(px(0.), px(10.), gpui::rgba(0x00000044).into())
                             .blur_radius(px(30.)),
@@ -206,8 +206,8 @@ impl<D: PickerDelegate> Picker<D> {
                 this.p_0()
                     .rounded(px(12.))
                     .overflow_hidden()
-                    .bg(gpui::rgb(0x292B39))
-                    .border_color(gpui::rgb(0x505061))
+                    .bg(cx.theme().colors().elevated_surface_background)
+                    .border_color(cx.theme().colors().border)
                     .shadow(vec![
                         gpui::BoxShadow::new(px(0.), px(12.), gpui::rgba(0x00000055).into())
                             .blur_radius(px(36.)),

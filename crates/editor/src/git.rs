@@ -1,6 +1,7 @@
 pub(super) mod blame;
 
 use super::*;
+use theme::ActiveTheme as _;
 use ::git::{
     Oid, Restore, blame::BlameEntry, commit::ParsedCommitMessage, repository::RepoPath,
     status::FileStatus,
@@ -120,6 +121,108 @@ pub(super) enum DisplayDiffHunk {
         status: DiffHunkStatus,
         word_diffs: Vec<Range<MultiBufferOffset>>,
     },
+}
+
+fn hunk_header_line_span(start: Point, end: Point) -> (u32, u32) {
+    let start_line = start.row + 1;
+    let count = if end == start {
+        0
+    } else if end.column == 0 {
+        end.row.saturating_sub(start.row)
+    } else {
+        end.row.saturating_sub(start.row) + 1
+    };
+    (start_line, count)
+}
+
+fn hunk_caption_outline_name(
+    buffer: &language::BufferSnapshot,
+    range: Range<text::Anchor>,
+) -> Option<String> {
+    let items = buffer.outline_items_containing(range, true, None);
+    let item = items.last()?;
+    let text = item.text.as_ref();
+    let name = item
+        .name_ranges
+        .first()
+        .and_then(|name_range| text.get(name_range.clone()))
+        .unwrap_or(text)
+        .trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+pub(crate) fn render_excerpt_hunk_caption(
+    excerpt: &multi_buffer::ExcerptBoundaryInfo,
+    snapshot: &EditorSnapshot,
+    include_diff_ranges: bool,
+    cx: &App,
+) -> Option<AnyElement> {
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let buffer = buffer_snapshot.buffer_for_id(excerpt.buffer_id())?;
+    let outline_name = hunk_caption_outline_name(
+        buffer,
+        excerpt.range.context.start..excerpt.range.context.end,
+    );
+
+    let start_point = excerpt.start_anchor.to_point(buffer_snapshot);
+    let end_point = Point::new(excerpt.end_row.0, buffer_snapshot.line_len(excerpt.end_row));
+    let hunk = buffer_snapshot
+        .diff_hunks_in_range(start_point..end_point)
+        .next();
+
+    let caption = if include_diff_ranges {
+        let hunk = hunk?;
+        let new_start = hunk.buffer_range.start.to_point(buffer);
+        let new_end = hunk.buffer_range.end.to_point(buffer);
+        let (new_start_line, new_count) = hunk_header_line_span(new_start, new_end);
+
+        let diff = buffer_snapshot.diff_for_buffer_id(excerpt.buffer_id())?;
+        let base_text = diff.base_text();
+        let base_len = base_text.len();
+        let old_start = base_text.offset_to_point(hunk.diff_base_byte_range.start.0.min(base_len));
+        let old_end = base_text.offset_to_point(hunk.diff_base_byte_range.end.0.min(base_len));
+        let (old_start_line, old_count) = hunk_header_line_span(old_start, old_end);
+
+        match outline_name {
+            Some(name) => {
+                format!(
+                    "@@ \u{2212}{old_start_line},{old_count} +{new_start_line},{new_count} @@ {name}"
+                )
+            }
+            None => format!(
+                "@@ \u{2212}{old_start_line},{old_count} +{new_start_line},{new_count} @@"
+            ),
+        }
+    } else {
+        outline_name?
+    };
+
+    if caption.is_empty() {
+        return None;
+    }
+
+    Some(
+        h_flex()
+            .h(px(40.))
+            .w_full()
+            .flex_none()
+            .items_center()
+            .px(px(28.))
+            .bg(cx.theme().colors().editor_subheader_background)
+            .overflow_hidden()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .line_height(px(20.))
+                    .text_color(cx.theme().colors().text_accent)
+                    .child(caption),
+            )
+            .into_any_element(),
+    )
 }
 
 #[derive(Clone)]

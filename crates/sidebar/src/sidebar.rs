@@ -30,9 +30,9 @@ use feature_flags::{
 };
 use gpui::{
     Action as _, AnyElement, App, ClickEvent, Context, Decorations, DismissEvent, Entity, EntityId,
-    FocusHandle, Focusable, KeyContext, ListState, Modifiers, Pixels, Render, SharedString, Task,
-    TaskExt, WeakEntity, Window, WindowBackgroundAppearance, WindowHandle, linear_color_stop,
-    linear_gradient, list, prelude::*, px,
+    FocusHandle, Focusable, FontWeight, KeyContext, ListState, Modifiers, Pixels, Render,
+    SharedString, Task, TaskExt, WeakEntity, Window, WindowBackgroundAppearance, WindowControlArea,
+    WindowHandle, linear_color_stop, linear_gradient, list, prelude::*, px,
 };
 use itertools::Itertools;
 use language_model::LanguageModelRegistry;
@@ -59,9 +59,10 @@ use std::sync::Arc;
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::{
     AgentThreadStatus, Avatar, ButtonLike, CommonAnimationExt, ContextMenu, ContextMenuEntry,
-    GradientFade, HighlightedLabel, KeyBinding, ListItem, ListItemSpacing, PopoverMenu,
-    PopoverMenuHandle, ScrollAxes, Scrollbars, Tab, ThreadItem, ThreadItemWorktreeInfo, TintColor,
-    Tooltip, WithScrollbar, prelude::*, render_modifiers, right_click_menu,
+    GradientFade, HighlightedLabel, KeyBinding, KeyBindingStyle, ListItem, ListItemSpacing,
+    PopoverMenu, PopoverMenuHandle, ScrollAxes, Scrollbars, Tab, ThreadItem,
+    ThreadItemWorktreeInfo, TintColor, Tooltip, WithScrollbar, prelude::*, render_modifiers,
+    right_click_menu,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 use util::ResultExt as _;
@@ -2327,6 +2328,8 @@ impl Sidebar {
                         .pb(px(8.))
                         .text_size(px(11.))
                         .line_height(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .tracking(rems(0.07))
                         .text_color(cx.theme().colors().text_muted)
                         .child(date_group),
                 )
@@ -6367,6 +6370,14 @@ impl Sidebar {
         } else {
             IconName::Thread
         };
+        let older_thread = thread.draft.is_none() && {
+            let timestamp = Self::thread_display_time(&thread.metadata);
+            chrono::Local::now()
+                .date_naive()
+                .signed_duration_since(timestamp.with_timezone(&chrono::Local).date_naive())
+                .num_days()
+                > 0
+        };
 
         let title_generating = thread.is_title_generating
             || self
@@ -6377,6 +6388,12 @@ impl Sidebar {
             .compact(true)
             .base_bg(cx.theme().colors().panel_background)
             .icon(icon)
+            .icon_color(Color::Custom(cx.theme().colors().icon))
+            .title_label_color(Color::Custom(if older_thread {
+                cx.theme().colors().text_muted
+            } else {
+                cx.theme().colors().text
+            }))
             .when(is_draft, |this| {
                 this.icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
             })
@@ -6840,6 +6857,7 @@ impl Sidebar {
                     .child(
                         h_flex()
                             .w_full()
+                            .items_center()
                             .text_left()
                             .gap(px(10.))
                             .child(
@@ -6848,15 +6866,27 @@ impl Sidebar {
                                     .min_w_0()
                                     .gap(px(3.))
                                     .child(
-                                        Label::new(project_name).size(LabelSize::Small).truncate(),
+                                        div()
+                                            .text_size(px(14.))
+                                            .line_height(px(20.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().colors().text)
+                                            .text_ellipsis()
+                                            .child(project_name),
                                     )
                                     .child(
-                                        Label::new(ui::localized("Switch project", cx))
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted),
+                                        div()
+                                            .text_size(px(12.))
+                                            .line_height(px(18.))
+                                            .text_color(cx.theme().colors().text_muted)
+                                            .child(ui::localized("Switch project", cx)),
                                     ),
                             )
-                            .child(Icon::new(IconName::ChevronDown).size(IconSize::Medium)),
+                            .child(
+                                Icon::new(IconName::ChevronDown)
+                                    .size(IconSize::Medium)
+                                    .color(Color::Muted),
+                            ),
                     ),
                 |_window, cx| Tooltip::for_action("Switch Project", &OpenRecent::default(), cx),
             )
@@ -7571,8 +7601,27 @@ impl Sidebar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let color = cx.theme().colors();
         let on_left = self.side(cx) == SidebarSide::Left;
+        let unselected_icon = Color::Muted;
+        let selected_icon = Color::Accent;
+        let selected_background = cx.theme().colors().element_active;
+
+        let rail_button = |id: ElementId, icon: IconName, selected: bool| {
+            let button = IconButton::new(id, icon)
+                .width(px(36.))
+                .height(px(36.).into())
+                .corner_radius(px(8.))
+                .size(ButtonSize::None)
+                .icon_size(IconSize::Custom(rems_from_px(18_f32)))
+                .icon_color(unselected_icon)
+                .selected_icon_color(selected_icon)
+                .toggle_state(selected);
+            if selected {
+                button.background(selected_background.into())
+            } else {
+                button
+            }
+        };
 
         let panel_buttons = panels
             .iter()
@@ -7583,15 +7632,9 @@ impl Sidebar {
                 };
                 let tooltip = panel.icon_tooltip(window, cx)?;
                 let panel_id = panel.panel_id();
+                let selected = revealed_panel_id == Some(panel_id);
                 Some(
-                    IconButton::new(("sidebar-rail-panel", panel_id), icon)
-                        .width(px(36.))
-                        .height(px(36.).into())
-                        .corner_radius(px(8.))
-                        .size(ButtonSize::Large)
-                        .icon_size(IconSize::Custom(rems_from_px(18_f32)))
-                        .toggle_state(revealed_panel_id == Some(panel_id))
-                        .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                    rail_button(("sidebar-rail-panel", panel_id).into(), icon, selected)
                         .tooltip(Tooltip::text(tooltip))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.toggle_hosted_panel(panel_id, window, cx);
@@ -7607,38 +7650,22 @@ impl Sidebar {
             .py(px(14.))
             .gap(px(12.))
             .items_center()
-            .bg(gpui::rgb(0x1C1E27))
+            .bg(cx.theme().colors().title_bar_inactive_background)
             .when(on_left, |this| this.border_r_1())
             .when(!on_left, |this| this.border_l_1())
-            .border_color(color.border)
+            .border_color(cx.theme().colors().border_variant)
             .child(
-                IconButton::new("sidebar-rail-threads", IconName::Thread)
-                    .width(px(36.))
-                    .height(px(36.).into())
-                    .corner_radius(px(8.))
-                    .size(ButtonSize::Large)
-                    .icon_size(IconSize::Custom(rems_from_px(18_f32)))
-                    .toggle_state(revealed_panel_id.is_none())
-                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                    .tooltip(Tooltip::text("Threads"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.hide_hosted_panels(window, cx);
-                    })),
+                rail_button(
+                    "sidebar-rail-threads".into(),
+                    IconName::Thread,
+                    revealed_panel_id.is_none(),
+                )
+                .tooltip(Tooltip::text("Threads"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.hide_hosted_panels(window, cx);
+                })),
             )
             .children(panel_buttons)
-            .child(div().flex_1())
-            .child(
-                IconButton::new("sidebar-rail-settings", IconName::Settings)
-                    .width(px(36.))
-                    .height(px(36.).into())
-                    .corner_radius(px(8.))
-                    .size(ButtonSize::Large)
-                    .icon_size(IconSize::Custom(rems_from_px(18_f32)))
-                    .tooltip(Tooltip::text("Settings"))
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(OpenSettings.boxed_clone(), cx);
-                    }),
-            )
     }
 
     fn toggle_hosted_panel(
@@ -7709,13 +7736,31 @@ impl Sidebar {
         panel_name: Option<&str>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let switcher_open = self.recent_projects_popover_handle.is_deployed();
         v_flex()
             .flex_none()
-            .px(px(16.))
-            .gap(px(12.))
             .child(
                 h_flex()
+                    .id("sidebar-project-header")
+                    .h(px(76.))
+                    .px(px(16.))
+                    .pb(px(12.))
                     .gap(px(10.))
+                    .items_center()
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_click(|event, window, _cx| {
+                        if event.click_count() == 2 {
+                            window.titlebar_double_click();
+                        }
+                    })
+                    .on_mouse_move(|event, window, _cx| {
+                        if event.dragging() {
+                            window.start_window_move();
+                        }
+                    })
+                    .when(switcher_open, |this| {
+                        this.bg(cx.theme().colors().ghost_element_hover)
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -7724,113 +7769,138 @@ impl Sidebar {
                     )
                     .child(self.render_sidebar_toggle_button(cx)),
             )
-            .when(panel_name.is_none(), |this| {
-                this.child(
-                    h_flex()
-                        .h(px(34.))
-                        .px(px(10.))
-                        .gap(px(9.))
-                        .rounded(px(7.))
-                        .border_1()
-                        .border_color(cx.theme().colors().border)
-                        .bg(cx.theme().colors().title_bar_background)
-                        .child(
-                            Icon::new(IconName::MagnifyingGlass)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .child(self.render_filter_input(cx))
-                        .when(self.has_filter_query(cx), |this| {
-                            this.child(
-                                IconButton::new("clear_filter", IconName::Close)
-                                    .icon_size(IconSize::Small)
-                                    .tooltip(Tooltip::text("Clear Search"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.reset_filter_editor_text(window, cx);
-                                        this.update_entries(cx);
-                                    })),
-                            )
-                        }),
-                )
-            })
-            .when(panel_name == Some("Project Panel"), |this| {
-                this.child(
-                    ButtonLike::new("sidebar-search-files")
-                        .style(ButtonStyle::Outlined)
-                        .full_width()
-                        .height(px(34.).into())
-                        .corner_radius(px(7.))
-                        .background(gpui::rgb(0x20222C).into())
-                        .child(
+            .child(
+                v_flex()
+                    .w(px(212.))
+                    .self_center()
+                    .pb(px(12.))
+                    .when(panel_name.is_none(), |this| {
+                        this.child(
                             h_flex()
+                                .h(px(34.))
                                 .w_full()
+                                .px(px(10.))
                                 .gap(px(9.))
-                                .px(px(9.))
+                                .rounded(px(7.))
+                                .border_1()
+                                .border_color(cx.theme().colors().border)
+                                .bg(cx.theme().colors().title_bar_background)
                                 .child(
                                     Icon::new(IconName::MagnifyingGlass)
                                         .size(IconSize::Custom(rems_from_px(15_f32)))
-                                        .color(Color::Custom(gpui::rgb(0xB4B5C5).into())),
+                                        .color(Color::Muted),
                                 )
                                 .child(
                                     div()
+                                        .flex_1()
+                                        .min_w_0()
                                         .text_size(px(12.))
                                         .line_height(px(18.))
-                                        .text_color(gpui::rgb(0xB4B5C5))
-                                        .child(ui::localized("Search files…", cx)),
-                                ),
+                                        .text_color(cx.theme().colors().text_placeholder)
+                                        .child(self.render_filter_input(cx)),
+                                )
+                                .when(self.has_filter_query(cx), |this| {
+                                    this.child(
+                                        IconButton::new("clear_filter", IconName::Close)
+                                            .icon_size(IconSize::Small)
+                                            .tooltip(Tooltip::text("Clear Search"))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.reset_filter_editor_text(window, cx);
+                                                this.update_entries(cx);
+                                            })),
+                                    )
+                                }),
                         )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if let Some(workspace) = this.active_workspace(cx) {
-                                workspace.read(cx).focus_handle(cx).focus(window, cx);
-                            }
-                            match cx.build_action("file_finder::Toggle", None) {
-                                Ok(action) => window.dispatch_action(action, cx),
-                                Err(error) => log::error!("Could not open file search: {error:#}"),
-                            }
-                        })),
-                )
-            })
-            .when(panel_name.is_some(), |this| this.pb(px(12.)))
-            .when(panel_name.is_none(), |this| {
-                this.child(
-                    div()
-                        .w_full()
-                        .border_1()
-                        .border_color(cx.theme().status().info_border)
-                        .rounded(px(8.))
-                        .child(
-                            ButtonLike::new("sidebar-new-thread")
+                    })
+                    .when(panel_name == Some("Project Panel"), |this| {
+                        this.child(
+                            ButtonLike::new("sidebar-search-files")
+                                .style(ButtonStyle::Outlined)
+                                .size(ButtonSize::None)
                                 .full_width()
-                                .height(px(36.).into())
+                                .height(px(34.).into())
                                 .corner_radius(px(7.))
-                                .style(ButtonStyle::Tinted(TintColor::Accent))
+                                .background(cx.theme().colors().title_bar_background)
                                 .child(
                                     h_flex()
                                         .w_full()
-                                        .text_left()
-                                        .px(px(7.))
-                                        .gap(px(10.))
+                                        .gap(px(9.))
+                                        .px(px(10.))
                                         .child(
-                                            Icon::new(IconName::Plus)
-                                                .size(IconSize::Medium)
-                                                .color(Color::Accent),
+                                            Icon::new(IconName::MagnifyingGlass)
+                                                .size(IconSize::Custom(rems_from_px(15_f32)))
+                                                .color(Color::Muted),
                                         )
                                         .child(
                                             div()
-                                                .flex_1()
-                                                .text_size(px(13.))
-                                                .child(ui::localized("New thread", cx)),
-                                        )
-                                        .child(KeyBinding::for_action_in(
+                                                .text_size(px(12.))
+                                                .line_height(px(18.))
+                                                .text_color(cx.theme().colors().text_placeholder)
+                                                .child(ui::localized("Search files…", cx)),
+                                        ),
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if let Some(workspace) = this.active_workspace(cx) {
+                                        workspace.read(cx).focus_handle(cx).focus(window, cx);
+                                    }
+                                    match cx.build_action("file_finder::Toggle", None) {
+                                        Ok(action) => window.dispatch_action(action, cx),
+                                        Err(error) => {
+                                            log::error!("Could not open file search: {error:#}")
+                                        }
+                                    }
+                                })),
+                        )
+                    }),
+            )
+            .when(panel_name.is_none(), |this| {
+                this.child(
+                    div().w(px(212.)).self_center().child(
+                        ButtonLike::new("sidebar-new-thread")
+                            .size(ButtonSize::None)
+                            .full_width()
+                            .height(px(38.).into())
+                            .corner_radius(px(8.))
+                            .background(cx.theme().colors().ghost_element_selected)
+                            .custom_style({
+                                let border = cx.theme().colors().border_selected;
+                                move |this| this.border_1().border_color(border)
+                            })
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .text_left()
+                                    .px(px(12.))
+                                    .gap(px(10.))
+                                    .child(
+                                        Icon::new(IconName::Plus)
+                                            .size(IconSize::Medium)
+                                            .color(Color::Accent),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(13.))
+                                            .line_height(px(16.))
+                                            .text_color(cx.theme().colors().text)
+                                            .child(ui::localized("New thread", cx)),
+                                    )
+                                    .child(
+                                        KeyBinding::for_action_in(
                                             &NewThreadInGroup,
                                             &self.focus_handle,
                                             cx,
-                                        )),
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.new_thread_in_group(&NewThreadInGroup, window, cx);
-                                })),
-                        ),
+                                        )
+                                        .style(KeyBindingStyle::Label)
+                                        .size(px(11.))
+                                        .color(Color::Muted),
+                                    ),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_thread_in_group(&NewThreadInGroup, window, cx);
+                            })),
+                    ),
                 )
             })
     }
@@ -7876,6 +7946,7 @@ impl Sidebar {
                     .width(px(18.))
                     .height(px(18.).into())
                     .icon_size(IconSize::Custom(rems_from_px(18_f32)))
+                    .icon_color(Color::Muted)
                     .tooltip(Tooltip::element(move |_window, cx| {
                         v_flex()
                             .gap_1()
@@ -7912,35 +7983,48 @@ impl Sidebar {
     /// sidebar is the only chrome the user has, so the signed-in account is
     /// surfaced here instead of only in the title bar.
     fn render_account_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let border = cx.theme().colors().border;
-
         let content = match self.user_store.read(cx).current_user() {
             Some(user) => ButtonLike::new("sidebar-account")
                 .full_width()
-                .height(px(52.).into())
-                .aria_label("Account")
+                .size(ButtonSize::None)
+                .height(px(56.).into())
+                .corner_radius(px(8.))
+                .aria_label("Account & settings")
                 .child(
                     h_flex()
                         .w_full()
+                        .items_center()
+                        .text_left()
+                        .px(px(8.))
                         .gap(px(10.))
                         .child(Avatar::new(user.avatar_uri.clone()).size(px(30.)))
                         .child(
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .gap(px(2.))
+                                .gap(px(3.))
                                 .child(
-                                    Label::new(user.username.clone())
-                                        .size(LabelSize::Small)
-                                        .truncate(),
+                                    div()
+                                        .text_size(px(14.))
+                                        .line_height(px(20.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().colors().text)
+                                        .text_ellipsis()
+                                        .child(user.username.clone()),
                                 )
                                 .child(
-                                    Label::new(ui::localized("Account & settings", cx))
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted),
+                                    div()
+                                        .text_size(px(12.))
+                                        .line_height(px(18.))
+                                        .text_color(cx.theme().colors().text_muted)
+                                        .child(ui::localized("Account & settings", cx)),
                                 ),
                         )
-                        .child(Icon::new(IconName::ChevronDown).size(IconSize::Small)),
+                        .child(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::Medium)
+                                .color(Color::Muted),
+                        ),
                 )
                 .tooltip(move |_, cx| Tooltip::for_action("Open Settings", &OpenSettings, cx))
                 .on_click(|_, window, cx| {
@@ -7951,10 +8035,15 @@ impl Sidebar {
                 let client = self.client.clone();
                 ButtonLike::new("sidebar-sign-in")
                     .full_width()
+                    .size(ButtonSize::None)
+                    .height(px(56.).into())
+                    .corner_radius(px(8.))
                     .aria_label("Sign in")
                     .child(
                         h_flex()
                             .w_full()
+                            .text_left()
+                            .px(px(8.))
                             .gap_2()
                             .child(
                                 Icon::new(IconName::Person)
@@ -7979,10 +8068,11 @@ impl Sidebar {
         };
 
         h_flex()
-            .min_h(px(68.))
-            .px(px(12.))
+            .h(px(68.))
+            .px(px(8.))
+            .items_center()
             .border_t_1()
-            .border_color(border)
+            .border_color(cx.theme().colors().border)
             .child(content)
     }
 
@@ -8406,15 +8496,11 @@ impl Focusable for Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _titlebar_height = ui::utils::platform_title_bar_height(window);
         let ui_font = theme_settings::setup_ui_font(window, cx);
         let sticky_header = self.render_sticky_header(window, cx);
 
-        let color = cx.theme().colors();
-        let bg = color.panel_background;
-
-        let no_open_projects = !self.contents.has_open_projects;
         let no_search_results = self.contents.entries.is_empty();
+        let no_open_projects = !self.contents.has_open_projects;
         let hosted_panels = self.hosted_panels(cx);
         let revealed_panel = self.revealed_panel(cx);
         let sidebar_on_left = self.side(cx) == SidebarSide::Left;
@@ -8493,13 +8579,19 @@ impl Render for Sidebar {
                         }),
                 }
             })
-            .bg(bg)
+            .bg(cx.theme().colors().panel_background)
             .when(self.side(cx) == SidebarSide::Left, |el| el.border_r_1())
             .when(self.side(cx) == SidebarSide::Right, |el| el.border_l_1())
-            .border_color(color.border)
+            .border_color(cx.theme().colors().border)
             .map(|this| match &self.view {
                 SidebarView::ThreadList => {
-                    this.child(self.render_sidebar_header(window, cx)).child(
+                    this.when(
+                        !cfg!(target_os = "macos")
+                            && !window.is_fullscreen()
+                            && !window.is_simple_fullscreen(),
+                        |this| this.child(self.render_sidebar_header(window, cx)),
+                    )
+                    .child(
                         h_flex()
                             // `h_flex` centers its children, which would collapse
                             // the thread list to its content height; the rail and
@@ -8536,8 +8628,6 @@ impl Render for Sidebar {
                                                     .overflow_hidden()
                                                     .child(panel.to_any()),
                                             )
-                                        } else if no_open_projects {
-                                            this.child(self.render_empty_state(cx))
                                         } else {
                                             this.child(
                                                 v_flex()
@@ -8552,9 +8642,14 @@ impl Render for Sidebar {
                                                         .flex_1()
                                                         .size_full(),
                                                     )
-                                                    .when(no_search_results, |this| {
-                                                        this.child(self.render_no_results(cx))
-                                                    })
+                                                    .when(
+                                                        no_search_results
+                                                            && (!no_open_projects
+                                                                || self.has_filter_query(cx)),
+                                                        |this| {
+                                                            this.child(self.render_no_results(cx))
+                                                        },
+                                                    )
                                                     .when_some(sticky_header, |this, header| {
                                                         this.child(header)
                                                     })

@@ -1715,7 +1715,7 @@ When trusted, project settings are synchronized automatically, language and MCP 
   "toolbar": {
     "breadcrumbs": true,
     "quick_actions": true,
-    "selections_menu": true,
+    "selections_menu": false,
     "agent_review": true,
     "code_actions": false
   }
@@ -1872,8 +1872,8 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
     "show_active_file": false,
     "active_language_button": true,
     "cursor_position_button": true,
-    "line_endings_button": false,
-    "active_encoding_button": "non_utf8",
+    "line_endings_button": true,
+    "active_encoding_button": "enabled",
     "pending_keystrokes_indicator": true
   }
 }
@@ -1954,7 +1954,7 @@ While other options may be changed at a runtime and should be placed under `sett
 ```json [settings]
 {
   "global_lsp_settings": {
-    "button": true,
+    "button": false,
     "request_timeout": 120,
     "max_buffer_line_length": 20000,
     "notifications": {
@@ -4007,7 +4007,7 @@ Non-negative `integer` values
 ```json [settings]
 {
   "search": {
-    "button": true,
+    "button": false,
     "whole_word": false,
     "case_sensitive": false,
     "include_ignored": false,
@@ -5462,7 +5462,7 @@ Available variables:
     "sticky_scroll": true,
     "show_diagnostics": "all",
     "indent_guides": {
-      "show": "always"
+      "show": "never"
     },
     "sort_mode": "directories_first",
     "hide_root": false,
@@ -5843,7 +5843,7 @@ Visit [AI Quick Start](../ai/quick-start.md) under the AI section to learn more 
 
 - Description: Whether to keep the system from idle-sleeping while an agent thread is running. See [Keeping the System Awake](../ai/agent-panel.md#prevent-idle-sleep).
 - Setting: `agent.prevent_idle_sleep`
-- Default: `true`
+- Default: `false`
 
 **Options**
 

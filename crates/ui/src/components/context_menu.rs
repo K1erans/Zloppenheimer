@@ -2012,7 +2012,7 @@ impl ContextMenu {
                         this.height(px(if description.is_some() { 62. } else { 36. }))
                             .corner_radius(px(6.))
                             .horizontal_padding(px(12.))
-                            .selected_background(gpui::rgb(0x3A3548).into())
+                            .selected_background(cx.theme().colors().element_hover)
                     })
                     .disabled(*disabled)
                     .aria_role(if toggle.is_some() {
@@ -2136,9 +2136,21 @@ impl ContextMenu {
                                     .when_some(description.clone(), |this, description| {
                                         this.child(
                                             div()
-                                                .text_size(px(12.))
-                                                .line_height(px(18.))
-                                                .text_color(cx.theme().colors().text_muted)
+                                                .text_size(px(if self.dropdown_style {
+                                                    11.
+                                                } else {
+                                                    12.
+                                                }))
+                                                .line_height(px(if self.dropdown_style {
+                                                    16.
+                                                } else {
+                                                    18.
+                                                }))
+                                                .text_color(if self.dropdown_style {
+                                                    cx.theme().colors().text_muted
+                                                } else {
+                                                    cx.theme().colors().text_muted
+                                                })
                                                 .child(description),
                                         )
                                     }),
@@ -2351,8 +2363,8 @@ impl Render for ContextMenu {
                 .flex()
                 .when(self.dropdown_style, |this| {
                     this.rounded(px(10.))
-                        .bg(gpui::rgb(0x292C39))
-                        .border_color(gpui::rgb(0x4B475B))
+                        .bg(cx.theme().colors().elevated_surface_background)
+                        .border_color(cx.theme().colors().border)
                         .shadow(vec![
                             gpui::BoxShadow::new(px(0.), px(10.), gpui::rgba(0x00000044).into())
                                 .blur_radius(px(30.)),

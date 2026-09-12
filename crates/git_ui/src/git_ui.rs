@@ -1450,9 +1450,9 @@ impl GitCloneModal {
             .key_context("Picker")
             .w(px(560.))
             .max_h(px(620.))
-            .bg(gpui::rgb(0x292B39))
+            .bg(cx.theme().colors().elevated_surface_background)
             .border_1()
-            .border_color(gpui::rgb(0x505061))
+            .border_color(cx.theme().colors().border)
             .rounded(px(12.))
             .overflow_hidden()
             .child(
@@ -1488,7 +1488,7 @@ impl GitCloneModal {
                     div()
                         .px(px(18.))
                         .py(px(12.))
-                        .text_color(gpui::rgb(0xD8B5BB))
+                        .text_color(cx.theme().status().error)
                         .child(error.clone()),
                 )
             })
@@ -1506,7 +1506,7 @@ impl GitCloneModal {
                                     .full_width()
                                     .size(ButtonSize::None)
                                     .when(index == self.selected_repository, |this| {
-                                        this.background(gpui::rgb(0x444052).into())
+                                        this.background(cx.theme().colors().element_hover)
                                     })
                                     .child(
                                         v_flex()
@@ -1526,7 +1526,7 @@ impl GitCloneModal {
                                                     .child(
                                                         div()
                                                             .text_size(px(11.))
-                                                            .text_color(gpui::rgb(0xAEB2C9))
+                                                            .text_color(cx.theme().colors().text_muted)
                                                             .child(format!(
                                                                 "★ {}",
                                                                 repository.stargazers_count
@@ -1539,7 +1539,7 @@ impl GitCloneModal {
                                                     this.child(
                                                         div()
                                                             .text_size(px(12.))
-                                                            .text_color(gpui::rgb(0xB4B7CC))
+                                                            .text_color(cx.theme().colors().text_muted)
                                                             .child(description),
                                                     )
                                                 },
@@ -1558,7 +1558,7 @@ impl GitCloneModal {
                     .p(px(14.))
                     .gap(px(10.))
                     .border_t_1()
-                    .border_color(gpui::rgb(0x424452))
+                    .border_color(cx.theme().colors().border)
                     .child(
                         Button::new("cancel-github", ui::localized("Cancel", cx))
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),

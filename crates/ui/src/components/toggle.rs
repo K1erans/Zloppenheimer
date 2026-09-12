@@ -507,9 +507,9 @@ impl RenderOnce for Switch {
             .rounded_full()
             .when(self.settings_style, |this| {
                 this.p(px(2.)).border_1().bg(if is_on {
-                    gpui::rgb(0xA99ABD)
+                    cx.theme().colors().border_focused
                 } else {
-                    gpui::rgb(0x424554)
+                    cx.theme().colors().element_background
                 })
             })
             .when_some(
@@ -562,7 +562,7 @@ impl RenderOnce for Switch {
                                     .opacity(thumb_opacity)
                                     .when(self.settings_style, |this| {
                                         this.size(px(14.))
-                                            .bg(gpui::rgb(0xF5F2F9))
+                                            .bg(cx.theme().colors().text)
                                             .opacity(if self.disabled { 0.2 } else { 1.0 })
                                     }),
                             ),

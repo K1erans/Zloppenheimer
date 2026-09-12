@@ -1,5 +1,5 @@
 use chrono::{Datelike, Days, Local};
-use gpui::ScrollHandle;
+use gpui::{ScrollHandle, Subscription};
 use ui::{ButtonLike, Tooltip, prelude::*};
 use workspace::AppState;
 
@@ -16,6 +16,7 @@ enum ActivityPeriod {
 pub(crate) struct ProfilePageState {
     period: ActivityPeriod,
     scroll: ScrollHandle,
+    _subscriptions: Vec<Subscription>,
 }
 
 pub(crate) fn render_profile_page(
@@ -24,14 +25,16 @@ pub(crate) fn render_profile_page(
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
     if settings_window.profile_page_state.is_none() {
+        let mut subscriptions = Vec::new();
         if let Some(store) = agent::ActivityStore::try_global(cx) {
-            cx.observe(&store, |_, _, cx| cx.notify()).detach();
+            subscriptions.push(cx.observe(&store, |_, _, cx| cx.notify()));
         }
         let user_store = AppState::global(cx).user_store.clone();
-        cx.observe(&user_store, |_, _, cx| cx.notify()).detach();
+        subscriptions.push(cx.observe(&user_store, |_, _, cx| cx.notify()));
         settings_window.profile_page_state = Some(ProfilePageState {
             period: ActivityPeriod::Daily,
             scroll: ScrollHandle::new(),
+            _subscriptions: subscriptions,
         });
     }
     let Some(state) = settings_window.profile_page_state.as_ref() else {
@@ -47,10 +50,11 @@ pub(crate) fn render_profile_page(
         .map(SharedString::from)
         .or_else(|| user.as_ref().map(|user| user.username.clone()))
         .unwrap_or_else(|| "Your profile".into());
-    let username: SharedString = user
-        .as_ref()
-        .map(|user| user.username.clone())
-        .unwrap_or_else(|| "Not signed in".into());
+    let username: SharedString = match user.as_ref() {
+        Some(user) if user.username.starts_with('@') => user.username.clone(),
+        Some(user) => format!("@{}", user.username).into(),
+        None => "Not signed in".into(),
+    };
     let initials: String = name
         .split_whitespace()
         .take(2)
@@ -74,9 +78,9 @@ pub(crate) fn render_profile_page(
             [
                 compact_number(activity.lifetime_tokens),
                 compact_number(activity.peak_tokens),
-                format!("{}m", activity.longest_chat_seconds / 60),
-                format!("{} days", activity.current_streak),
-                format!("{} days", activity.longest_streak),
+                format_chat_duration(activity.longest_chat_seconds),
+                format_days(activity.current_streak),
+                format_days(activity.longest_streak),
             ]
         })
         .unwrap_or_default();
@@ -112,7 +116,12 @@ pub(crate) fn render_profile_page(
         counts.push((date, value));
     }
     let maximum = counts.iter().map(|(_, count)| *count).max().unwrap_or(0);
-    let colors = [0x2D303D, 0x51485F, 0x89769E, 0xD3B8ED];
+    let colors = [
+        cx.theme().colors().element_background,
+        cx.theme().colors().element_hover,
+        cx.theme().colors().text_accent.opacity(0.55),
+        cx.theme().colors().text_accent,
+    ];
     let columns = counts.chunks(7).enumerate().map(|(column, days)| {
         v_flex()
             .gap(px(4.))
@@ -130,7 +139,9 @@ pub(crate) fn render_profile_page(
                     .id(("activity-day", column * 7 + row))
                     .size(px(13.))
                     .rounded(px(3.))
-                    .bg(gpui::rgb(colors.get(level).copied().unwrap_or(0x2D303D)))
+                    .bg(*colors
+                        .get(level)
+                        .unwrap_or(&cx.theme().colors().element_background))
                     .when(*date > today, |this| this.opacity(0.3))
                     .tooltip(Tooltip::text(format!(
                         "{}: {} recorded tokens",
@@ -162,17 +173,21 @@ pub(crate) fn render_profile_page(
         .size_full()
         .pt(px(36.))
         .pb(px(28.))
-        .bg(gpui::rgb(0x232530))
+        .bg(cx.theme().colors().background)
         .track_scroll(&state.scroll)
         .overflow_y_scroll()
         .child(
             v_flex()
                 .w_full()
-                .max_w(px(948.))
+                .max_w(px(900.))
                 .mx_auto()
-                .px(px(24.))
                 .gap(px(32.))
-                .child(text(ui::localized("Profile", cx), 26., 34., 0xECECF2))
+                .child(text(
+                    ui::localized("Profile", cx),
+                    26.,
+                    34.,
+                    cx.theme().colors().text,
+                ))
                 .child(
                     v_flex()
                         .items_center()
@@ -183,28 +198,38 @@ pub(crate) fn render_profile_page(
                             div()
                                 .size(px(88.))
                                 .rounded_full()
-                                .bg(gpui::rgb(0x705E83))
+                                .bg(cx.theme().colors().text_accent)
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(text(initials, 30., 36., 0xF2EBF8)),
+                                .child(text(initials, 30., 36., cx.theme().colors().text)),
                         )
-                        .child(text(name, 28., 36., 0xECECF2))
+                        .child(text(name, 28., 36., cx.theme().colors().text))
                         .child(
                             h_flex()
                                 .gap(px(10.))
-                                .child(text(username, 14., 18., 0xA1A4B8))
+                                .child(text(username, 14., 18., cx.theme().colors().text_muted))
                                 .when_some(plan, |this, plan| {
-                                    this.child(text(ui::localized("·", cx), 14., 18., 0xA1A4B8))
-                                        .child(
-                                            div()
-                                                .border_1()
-                                                .border_color(gpui::rgb(0x51475F))
-                                                .rounded(px(6.))
-                                                .px(px(9.))
-                                                .py(px(3.))
-                                                .child(text(plan, 12., 16., 0xCDBDDE)),
-                                        )
+                                    this.child(text(
+                                        ui::localized("·", cx),
+                                        14.,
+                                        18.,
+                                        cx.theme().colors().text_muted,
+                                    ))
+                                    .child(
+                                        div()
+                                            .border_1()
+                                            .border_color(cx.theme().colors().border_selected)
+                                            .rounded(px(6.))
+                                            .px(px(9.))
+                                            .py(px(3.))
+                                            .child(text(
+                                                plan,
+                                                12.,
+                                                16.,
+                                                cx.theme().colors().text_accent,
+                                            )),
+                                    )
                                 }),
                         ),
                 )
@@ -212,9 +237,9 @@ pub(crate) fn render_profile_page(
                     h_flex()
                         .h(px(90.))
                         .w_full()
-                        .bg(gpui::rgb(0x282B37))
+                        .bg(cx.theme().colors().surface_background)
                         .border_1()
-                        .border_color(gpui::rgb(0x3C3F4C))
+                        .border_color(cx.theme().colors().border)
                         .rounded(px(11.))
                         .children(
                             [
@@ -234,9 +259,8 @@ pub(crate) fn render_profile_page(
                                     .justify_center()
                                     .gap(px(8.))
                                     .when(index > 0, |this| {
-                                        this.border_l_1().border_color(gpui::rgb(0x3C3F4C))
+                                        this.border_l_1().border_color(cx.theme().colors().border)
                                     })
-                                    .child(text(ui::localized(label, cx), 12., 16., 0xA1A4B8))
                                     .child(text(
                                         if loaded {
                                             values.get(index).cloned().unwrap_or_default()
@@ -245,54 +269,62 @@ pub(crate) fn render_profile_page(
                                         },
                                         21.,
                                         26.,
-                                        0xE1DAEA,
+                                        cx.theme().colors().text,
+                                    ))
+                                    .child(text(
+                                        ui::localized(label, cx),
+                                        12.,
+                                        16.,
+                                        cx.theme().colors().text_muted,
                                     ))
                             }),
                         ),
                 )
                 .child(
                     h_flex()
-                        .justify_between()
-                        .child(text(
-                            ui::localized("Token activity", cx),
-                            16.,
-                            20.,
-                            0xDEDBE8,
-                        ))
+                        .items_center()
+                        .gap(px(16.))
                         .child(
-                            h_flex().gap(px(4.)).children(
-                                [
-                                    (ActivityPeriod::Daily, "Daily"),
-                                    (ActivityPeriod::Weekly, "Weekly"),
-                                    (ActivityPeriod::Cumulative, "Cumulative"),
-                                ]
-                                .into_iter()
-                                .map(|(period, label)| {
-                                    ButtonLike::new(label)
-                                        .size(ButtonSize::None)
-                                        .corner_radius(px(5.))
-                                        .when(state.period == period, |this| {
-                                            this.background(gpui::rgb(0x3A3548).into())
-                                        })
-                                        .child(text(
-                                            label,
-                                            13.,
-                                            16.,
-                                            if state.period == period {
-                                                0xDCD3E8
-                                            } else {
-                                                0xA1A4B8
-                                            },
-                                        ))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if let Some(state) = this.profile_page_state.as_mut() {
-                                                state.period = period;
-                                            }
-                                            cx.notify();
-                                        }))
-                                        .custom_style(|this| this.px(px(10.)).py(px(5.)))
-                                }),
-                            ),
+                            text(
+                                ui::localized("Token activity", cx),
+                                16.,
+                                20.,
+                                cx.theme().colors().text,
+                            )
+                            .flex_1(),
+                        )
+                        .children(
+                            [
+                                (ActivityPeriod::Daily, "Daily"),
+                                (ActivityPeriod::Weekly, "Weekly"),
+                                (ActivityPeriod::Cumulative, "Cumulative"),
+                            ]
+                            .into_iter()
+                            .map(|(period, label)| {
+                                ButtonLike::new(label)
+                                    .size(ButtonSize::None)
+                                    .corner_radius(px(5.))
+                                    .when(state.period == period, |this| {
+                                        this.background(cx.theme().colors().element_hover.into())
+                                            .custom_style(|this| this.px(px(10.)).py(px(5.)))
+                                    })
+                                    .child(text(
+                                        label,
+                                        13.,
+                                        16.,
+                                        if state.period == period {
+                                            cx.theme().colors().text_accent
+                                        } else {
+                                            cx.theme().colors().text_muted
+                                        },
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(state) = this.profile_page_state.as_mut() {
+                                            state.period = period;
+                                        }
+                                        cx.notify();
+                                    }))
+                            }),
                         ),
                 )
                 .child(
@@ -313,7 +345,7 @@ pub(crate) fn render_profile_page(
                                         labels.get(month_index as usize).copied().unwrap_or(""),
                                         11.,
                                         14.,
-                                        0x969AAD,
+                                        cx.theme().colors().text_muted,
                                     )
                                 })),
                         )
@@ -321,18 +353,32 @@ pub(crate) fn render_profile_page(
                             h_flex()
                                 .justify_end()
                                 .gap(px(6.))
-                                .child(text(ui::localized("Less", cx), 10., 12., 0x969AAD))
-                                .children(colors.into_iter().map(|color| {
-                                    div().size(px(10.)).rounded(px(2.)).bg(gpui::rgb(color))
-                                }))
-                                .child(text(ui::localized("More", cx), 10., 12., 0x969AAD)),
+                                .child(text(
+                                    ui::localized("Less", cx),
+                                    10.,
+                                    12.,
+                                    cx.theme().colors().text_muted,
+                                ))
+                                .children(
+                                    colors
+                                        .into_iter()
+                                        .map(|color| div().size(px(10.)).rounded(px(2.)).bg(color)),
+                                )
+                                .child(text(
+                                    ui::localized("More", cx),
+                                    10.,
+                                    12.,
+                                    cx.theme().colors().text_muted,
+                                )),
                         )
-                        .child(text(source, 11., 16., 0x969AAD))
+                        .child(text(source, 11., 16., cx.theme().colors().text_muted))
                         .when_some(
                             activity
                                 .as_ref()
                                 .and_then(|activity| activity.error.clone()),
-                            |this, error| this.child(text(error, 12., 18., 0xC79EA5)),
+                            |this, error| {
+                                this.child(text(error, 12., 18., cx.theme().status().error))
+                            },
                         ),
                 ),
         )
@@ -340,11 +386,31 @@ pub(crate) fn render_profile_page(
 }
 
 fn compact_number(value: u64) -> String {
-    if value >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.)
+    if value >= 1_000_000_000 {
+        format!("{:.1}bn", value as f64 / 1_000_000_000.)
+    } else if value >= 1_000_000 {
+        format!("{:.1}m", value as f64 / 1_000_000.)
     } else if value >= 1_000 {
-        format!("{:.1}K", value as f64 / 1_000.)
+        format!("{:.1}k", value as f64 / 1_000.)
     } else {
         value.to_string()
+    }
+}
+
+fn format_chat_duration(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else {
+        format!("{}m", minutes)
+    }
+}
+
+fn format_days(count: u64) -> String {
+    if count == 1 {
+        "1 day".into()
+    } else {
+        format!("{} days", count)
     }
 }

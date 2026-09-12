@@ -48,6 +48,7 @@ impl RenderOnce for ModelSelectorHeader {
 pub struct ModelSelectorListItem {
     index: usize,
     title: SharedString,
+    subtitle: Option<SharedString>,
     icon: Option<ModelIcon>,
     is_selected: bool,
     is_focused: bool,
@@ -63,6 +64,7 @@ impl ModelSelectorListItem {
         Self {
             index,
             title: title.into(),
+            subtitle: None,
             icon: None,
             is_selected: false,
             is_focused: false,
@@ -72,6 +74,11 @@ impl ModelSelectorListItem {
             on_toggle_favorite: None,
             cost_info: None,
         }
+    }
+
+    pub fn subtitle(mut self, subtitle: impl Into<SharedString>) -> Self {
+        self.subtitle = Some(subtitle.into());
+        self
     }
 
     pub fn icon(mut self, icon: IconName) -> Self {
@@ -139,10 +146,10 @@ impl RenderOnce for ModelSelectorListItem {
 
         ListItem::new(self.index)
             .inset(false)
-            .height(px(36.))
+            .when(self.subtitle.is_none(), |this| this.height(px(36.)))
             .horizontal_padding(px(12.))
             .corner_radius(px(6.))
-            .selected_background(gpui::rgb(0x3A3548).into())
+            .selected_background(cx.theme().colors().element_hover)
             .spacing(ListItemSpacing::Sparse)
             .toggle_state(self.is_focused || self.is_selected)
             .when_some(self.disabled, |this, disabled_reason| {
@@ -164,14 +171,31 @@ impl RenderOnce for ModelSelectorListItem {
                         )
                     })
                     .child(
-                        div()
-                            .text_size(px(13.))
-                            .line_height(px(18.))
-                            .when(is_disabled, |this| {
-                                this.text_color(Color::Disabled.color(cx))
-                            })
-                            .truncate()
-                            .child(self.title),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .line_height(px(18.))
+                                    .text_color(if is_disabled {
+                                        Color::Disabled.color(cx)
+                                    } else {
+                                        cx.theme().colors().text
+                                    })
+                                    .truncate()
+                                    .child(self.title),
+                            )
+                            .when_some(self.subtitle, |this, subtitle| {
+                                this.child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .line_height(px(16.))
+                                        .text_color(cx.theme().colors().text_muted)
+                                        .child(subtitle),
+                                )
+                            }),
                     )
                     .when(self.is_latest, |parent| parent.child(Chip::new("Latest")))
                     .when_some(self.cost_info, |this, cost_info| {
@@ -247,7 +271,7 @@ impl RenderOnce for ModelSelectorFooter {
         v_flex()
             .w_full()
             .border_t_1()
-            .border_color(gpui::rgb(0x424452))
+            .border_color(cx.theme().colors().border)
             .child(
                 v_flex()
                     .id("manage-models")
@@ -257,7 +281,7 @@ impl RenderOnce for ModelSelectorFooter {
                     .gap(px(4.))
                     .rounded(px(6.))
                     .cursor_pointer()
-                    .hover(|this| this.bg(gpui::rgb(0x3A3548)))
+                    .hover(|this| this.bg(cx.theme().colors().element_hover))
                     .tooltip({
                         let action = action.boxed_clone();
                         move |_, cx| {
@@ -279,7 +303,7 @@ impl RenderOnce for ModelSelectorFooter {
                         div()
                             .text_size(px(11.))
                             .line_height(px(16.))
-                            .text_color(Color::Muted.color(cx))
+                            .text_color(cx.theme().colors().text_muted)
                             .child("Choose visible models and your default"),
                     )
                     .on_click(move |_, window, cx| {

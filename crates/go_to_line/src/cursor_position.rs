@@ -5,9 +5,8 @@ use std::{fmt::Write, num::NonZeroU32, time::Duration};
 use text::{Point, Selection};
 use ui::{
     Button, ButtonCommon, Clickable, Context, FluentBuilder, IntoElement, LabelSize, ParentElement,
-    Render, Tooltip, Window, div,
+    Render, Tooltip, Window, div, prelude::*,
 };
-use util::paths::FILE_ROW_COLUMN_DELIMITER;
 use workspace::{HideStatusItem, StatusBarSettings, StatusItemView, Workspace, item::ItemHandle};
 
 #[derive(Copy, Clone, Debug, Default, PartialOrd, PartialEq)]
@@ -214,17 +213,15 @@ impl Render for CursorPosition {
         }
 
         div().when_some(self.position, |el, position| {
-            let mut text = format!(
-                "{}{FILE_ROW_COLUMN_DELIMITER}{}",
-                position.line, position.character,
-            );
+            let mut text = format!("Ln {}, Col {}", position.line, position.character);
             self.write_position(&mut text, cx);
 
             let context = self.context.clone();
 
             el.child(
                 Button::new("go-to-line-column", text)
-                    .label_size(LabelSize::Small)
+                    .label_size(LabelSize::Custom(rems_from_px(11_f32)))
+                    .color(Color::Muted)
                     .tab_index(0isize)
                     .aria_label(format!(
                         "Line {}, column {}",

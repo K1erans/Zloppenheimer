@@ -524,6 +524,11 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Sets letter-spacing relative to the font size.
+    fn tracking(self, _tracking: impl Into<AbsoluteLength>) -> Self {
+        self
+    }
+
     /// Sets the background color of this element.
     ///
     /// This value cascades to its child elements.

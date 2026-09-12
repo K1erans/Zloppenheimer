@@ -233,9 +233,9 @@ impl SoloDiffView {
             .h(px(172.))
             .flex_none()
             .px(px(28.))
-            .bg(gpui::rgb(0x22252F))
+            .bg(cx.theme().colors().tab_bar_background)
             .border_t_1()
-            .border_color(gpui::rgb(0x3C3F4C))
+            .border_color(cx.theme().colors().border)
             .child(
                 h_flex()
                     .h(px(44.))
@@ -245,7 +245,8 @@ impl SoloDiffView {
                         div()
                             .text_size(px(13.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xD9DCE8))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(cx.theme().colors().text)
                             .child("Recent commits"),
                     )
                     .child(
@@ -255,7 +256,8 @@ impl SoloDiffView {
                                 div()
                                     .text_size(px(12.))
                                     .line_height(px(16.))
-                                    .text_color(gpui::rgb(0xBEB4D0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(cx.theme().colors().text_accent)
                                     .child("View history ↗"),
                             )
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -281,7 +283,7 @@ impl SoloDiffView {
                 this.child(
                     div()
                         .text_size(px(12.))
-                        .text_color(gpui::rgb(0xA4A8BB))
+                        .text_color(cx.theme().colors().text_muted)
                         .child(error.unwrap_or_else(|| {
                             if loading {
                                 "Loading commits…".into()
@@ -347,14 +349,17 @@ impl SoloDiffView {
                 h_flex()
                     .id(SharedString::from(sha.to_string()))
                     .h(px(36.))
-                    .gap(px(12.))
                     .border_t_1()
-                    .border_color(gpui::rgb(0x353846))
+                    .border_color(cx.theme().colors().border)
                     .cursor_pointer()
                     .child(
-                        Icon::new(IconName::Circle)
-                            .size(IconSize::Custom(rems(10. / 16.)))
-                            .color(Color::Muted),
+                        div()
+                            .w(px(22.))
+                            .flex_none()
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(cx.theme().colors().text_accent)
+                            .child("○"),
                     )
                     .child(
                         div()
@@ -363,30 +368,36 @@ impl SoloDiffView {
                             .overflow_hidden()
                             .text_size(px(12.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xC4C7D7))
+                            .text_color(cx.theme().colors().text)
                             .child(subject),
                     )
                     .child(
                         div()
-                            .w(px(158.))
+                            .w(px(170.))
+                            .flex_none()
                             .text_size(px(12.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xBEB4D0))
+                            .text_color(cx.theme().colors().text_accent)
                             .child(branch_label),
                     )
                     .child(
                         div()
-                            .w(px(110.))
+                            .w(px(100.))
+                            .flex_none()
+                            .font_buffer(cx)
                             .text_size(px(11.))
-                            .text_color(gpui::rgb(0xA4A8BB))
+                            .line_height(px(14.))
+                            .text_color(cx.theme().colors().text_muted)
                             .child(sha.to_string().chars().take(7).collect::<String>()),
                     )
                     .child(
                         div()
-                            .w(px(90.))
+                            .w(px(76.))
+                            .flex_none()
                             .text_right()
-                            .text_size(px(11.))
-                            .text_color(gpui::rgb(0xA4A8BB))
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(cx.theme().colors().text_muted)
                             .child(relative_time),
                     )
                     .on_click(move |_, window, cx| {
@@ -777,6 +788,11 @@ impl Render for SoloDiffView {
             .and_then(|entry| entry.diff_stat);
         let states = self.button_states(cx);
         let stage = states.stage_file;
+        let hunk_count = {
+            let buffer = self.buffer.read(cx).snapshot();
+            self.diff.read(cx).snapshot(cx).hunks(&buffer).count()
+        };
+        let hunk_label = if hunk_count == 1 { "hunk" } else { "hunks" };
         v_flex()
             .size_full()
             .child(
@@ -786,7 +802,7 @@ impl Render for SoloDiffView {
                     .px(px(28.))
                     .gap(px(12.))
                     .border_b_1()
-                    .border_color(gpui::rgb(0x3A3D4A))
+                    .border_color(cx.theme().colors().border)
                     .child(Icon::new(IconName::File).size(IconSize::Custom(rems(17. / 16.))))
                     .child(
                         div()
@@ -795,20 +811,20 @@ impl Render for SoloDiffView {
                             .overflow_hidden()
                             .text_size(px(13.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xDADDE8))
+                            .text_color(cx.theme().colors().text)
                             .child(path),
                     )
                     .when_some(diff_stat, |this, stat| {
                         this.child(
                             div()
                                 .text_size(px(13.))
-                                .text_color(gpui::rgb(0xA8C9B2))
+                                .text_color(cx.theme().colors().version_control_added)
                                 .child(format!("+{}", stat.added)),
                         )
                         .child(
                             div()
                                 .text_size(px(13.))
-                                .text_color(gpui::rgb(0xD6A4AA))
+                                .text_color(cx.theme().colors().version_control_deleted)
                                 .child(format!("−{}", stat.deleted)),
                         )
                     })
@@ -816,20 +832,23 @@ impl Render for SoloDiffView {
                     .child(
                         ButtonLike::new("review-stage-file")
                             .size(ButtonSize::None)
-                            .height(px(32.).into())
-                            .custom_style(|this| {
-                                this.px(px(11.))
-                                    .border_1()
-                                    .border_color(gpui::rgb(0x60546E))
-                            })
+                            .height(px(30.).into())
                             .corner_radius(px(6.))
-                            .background(gpui::rgb(0x3C3448).into())
+                            .background(cx.theme().colors().element_hover)
+                            .custom_style({
+                                let border = cx.theme().colors().border_selected;
+                                move |this| {
+                                    this.border_1()
+                                        .border_color(border)
+                                        .px(px(12.))
+                                }
+                            })
                             .disabled(!stage && !states.unstage_file)
                             .child(
                                 div()
                                     .text_size(px(12.))
                                     .line_height(px(16.))
-                                    .text_color(gpui::rgb(0xE2D2ED))
+                                    .text_color(cx.theme().colors().text_accent)
                                     .child(if stage {
                                         "Stage file +"
                                     } else {
@@ -841,12 +860,18 @@ impl Render for SoloDiffView {
                             })),
                     ),
             )
+            .child(div().flex_1().min_h_0().child(self.editor.clone()))
             .child(
                 div()
-                    .flex_1()
-                    .min_h_0()
-                    .pt(px(20.))
-                    .child(self.editor.clone()),
+                    .flex_none()
+                    .px(px(28.))
+                    .py(px(18.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(cx.theme().colors().text_muted)
+                    .child(format!(
+                        "Working tree compared with HEAD · {hunk_count} {hunk_label}"
+                    )),
             )
             .child(self.render_recent_commits(cx))
     }

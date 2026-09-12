@@ -606,7 +606,7 @@ impl Pane {
             can_split_predicate: None,
             can_toggle_zoom: true,
             should_display_tab_bar: Rc::new(|_, cx| TabBarSettings::get_global(cx).show),
-            should_display_welcome_page: false,
+            should_display_welcome_page: true,
             render_tab_bar_buttons: Rc::new(default_render_tab_bar_buttons),
             render_tab_bar: Rc::new(Self::render_tab_bar),
             show_tab_bar_buttons: TabBarSettings::get_global(cx).show_tab_bar_buttons,
@@ -714,9 +714,7 @@ impl Pane {
                 self.last_focus_handle_by_item
                     .insert(active_item.item_id(), focused.downgrade());
             }
-        } else if self.should_display_welcome_page
-            && let Some(welcome_page) = self.welcome_page.as_ref()
-        {
+        } else if let Some(welcome_page) = self.welcome_page.as_ref() {
             if self.focus_handle.is_focused(window) {
                 welcome_page.read(cx).focus_handle(cx).focus(window, cx);
             }
@@ -4387,59 +4385,36 @@ fn default_render_tab_bar_buttons(
         .when(!pane.in_center_group, |this| {
             this.child(render_new_item_button(pane))
         })
-        .when(
-            pane.in_center_group && WorkspaceSettings::get_global(cx).show_bottom_panel_button,
-            |this| {
-                this.gap_0().child(
-                    IconButton::new("terminal", IconName::Terminal)
-                        .width(px(36.))
-                        .height(px(36.).into())
-                        .corner_radius(px(8.))
-                        .icon_size(IconSize::Custom(rems_from_px(18_f32)))
-                        .tooltip(Tooltip::text("Toggle terminal"))
-                        .on_click(|_, window, cx| {
-                            match cx.build_action("terminal_panel::Toggle", None) {
-                                Ok(action) => window.dispatch_action(action, cx),
-                                Err(error) => log::error!("Failed to toggle terminal: {error}"),
+        .when(!pane.in_center_group, |this| {
+            this.child(
+                PopoverMenu::new("pane-tab-bar-split")
+                    .trigger_with_tooltip(
+                        IconButton::new("split", IconName::Split)
+                            .icon_size(IconSize::Small)
+                            .disabled(!can_clone && !can_split_move),
+                        Tooltip::text("Split Pane"),
+                    )
+                    .anchor(Anchor::TopRight)
+                    .with_handle(pane.split_item_context_menu_handle.clone())
+                    .menu(move |window, cx| {
+                        ContextMenu::build(window, cx, |menu, _, _| {
+                            let mode = SplitMode::MovePane;
+                            if can_split_move {
+                                menu.action("Split Right", SplitRight { mode }.boxed_clone())
+                                    .action("Split Left", SplitLeft { mode }.boxed_clone())
+                                    .action("Split Up", SplitUp { mode }.boxed_clone())
+                                    .action("Split Down", SplitDown { mode }.boxed_clone())
+                            } else {
+                                menu.action("Split Right", SplitRight::default().boxed_clone())
+                                    .action("Split Left", SplitLeft::default().boxed_clone())
+                                    .action("Split Up", SplitUp::default().boxed_clone())
+                                    .action("Split Down", SplitDown::default().boxed_clone())
                             }
-                        }),
-                )
-            },
-        )
-        .child(
-            PopoverMenu::new("pane-tab-bar-split")
-                .trigger_with_tooltip(
-                    IconButton::new("split", IconName::Split)
-                        .icon_size(IconSize::Small)
-                        .when(pane.in_center_group, |this| {
-                            this.width(px(36.))
-                                .height(px(36.).into())
-                                .corner_radius(px(8.))
-                                .icon_size(IconSize::Custom(rems_from_px(18_f32)))
                         })
-                        .disabled(!can_clone && !can_split_move),
-                    Tooltip::text("Split Pane"),
-                )
-                .anchor(Anchor::TopRight)
-                .with_handle(pane.split_item_context_menu_handle.clone())
-                .menu(move |window, cx| {
-                    ContextMenu::build(window, cx, |menu, _, _| {
-                        let mode = SplitMode::MovePane;
-                        if can_split_move {
-                            menu.action("Split Right", SplitRight { mode }.boxed_clone())
-                                .action("Split Left", SplitLeft { mode }.boxed_clone())
-                                .action("Split Up", SplitUp { mode }.boxed_clone())
-                                .action("Split Down", SplitDown { mode }.boxed_clone())
-                        } else {
-                            menu.action("Split Right", SplitRight::default().boxed_clone())
-                                .action("Split Left", SplitLeft::default().boxed_clone())
-                                .action("Split Up", SplitUp::default().boxed_clone())
-                                .action("Split Down", SplitDown::default().boxed_clone())
-                        }
-                    })
-                    .into()
-                }),
-        )
+                        .into()
+                    }),
+            )
+        })
         .when(!pane.in_center_group, |this| {
             this.child({
                 let zoomed = pane.is_zoomed();
@@ -4658,7 +4633,6 @@ impl Render for Pane {
                 pane.child((self.render_tab_bar.clone())(self, window, cx))
             })
             .child({
-                let has_worktrees = project.read(cx).visible_worktrees(cx).next().is_some();
                 // main content
                 div()
                     .flex_1()
@@ -4694,14 +4668,14 @@ impl Render for Pane {
                                         }
                                     },
                                 ));
-                            if has_worktrees || !self.should_display_welcome_page {
+                            if !self.should_display_welcome_page {
                                 placeholder
                             } else {
                                 if self.welcome_page.is_none() {
                                     let workspace = self.workspace.clone();
                                     self.welcome_page = Some(cx.new(|cx| {
                                         crate::welcome::WelcomePage::new(
-                                            workspace, true, window, cx,
+                                            workspace, true, true, window, cx,
                                         )
                                     }));
                                 }

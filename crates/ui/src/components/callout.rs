@@ -129,8 +129,8 @@ impl RenderOnce for Callout {
                 .gap(px(10.))
                 .rounded(px(10.))
                 .border_1()
-                .border_color(gpui::rgb(0x484452))
-                .bg(gpui::rgb(0x292B37))
+                .border_color(cx.theme().colors().border)
+                .bg(cx.theme().colors().elevated_surface_background)
                 .child(
                     h_flex()
                         .relative()
@@ -163,7 +163,7 @@ impl RenderOnce for Callout {
                         .w_full()
                         .text_size(px(13.))
                         .line_height(px(20.))
-                        .text_color(gpui::rgb(0xB0B3C5));
+                        .text_color(cx.theme().colors().text_muted);
                     if let Some(content) = self.description_slot {
                         this.child(description.child(content))
                     } else if let Some(content) = self.description {

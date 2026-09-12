@@ -168,7 +168,7 @@ impl RenderOnce for Tab {
                         .rounded(px(5.))
                         .border_0()
                         .bg(if self.selected {
-                            gpui::rgb(0x2D2F3B).into()
+                            cx.theme().colors().tab_active_background
                         } else {
                             gpui::transparent_black()
                         })
@@ -179,7 +179,7 @@ impl RenderOnce for Tab {
                             this.w(px(174.))
                                 .min_w(px(174.))
                                 .max_w(px(174.))
-                                .bg(gpui::rgb(0x2B2D3A))
+                                .bg(cx.theme().colors().tab_active_background)
                                 .border_color(cx.theme().colors().border_focused)
                         })
                         .when(!self.selected, |this| {

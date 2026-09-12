@@ -34,11 +34,18 @@ impl Render for DiagnosticIndicator {
         }
 
         let diagnostic_indicator = match (self.summary.error_count, self.summary.warning_count) {
-            (0, 0) => h_flex().child(
-                Icon::new(IconName::Check)
-                    .size(IconSize::Small)
-                    .color(Color::Default),
-            ),
+            (0, 0) => h_flex()
+                .gap_1()
+                .child(
+                    Icon::new(IconName::Check)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .child(
+                    Label::new("No problems")
+                        .size(LabelSize::Custom(rems_from_px(11_f32)))
+                        .color(Color::Muted),
+                ),
             (error_count, warning_count) => h_flex()
                 .gap_1()
                 .when(error_count > 0, |this| {

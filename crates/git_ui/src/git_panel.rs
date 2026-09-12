@@ -1125,6 +1125,7 @@ pub struct GitPanel {
     new_staged_count: usize,
     pending_commit: Option<Task<()>>,
     pending_remote_operation: Option<RemoteOperationKind>,
+    last_fetched_at: Option<OffsetDateTime>,
     amend_pending: bool,
     original_commit_message: Option<String>,
     pending_commit_message_restores: BTreeMap<String, SerializedCommitMessage>,
@@ -1428,6 +1429,7 @@ impl GitPanel {
                 diff_stat_total: DiffStat::default(),
                 pending_commit: None,
                 pending_remote_operation: None,
+                last_fetched_at: None,
                 amend_pending,
                 original_commit_message,
                 pending_commit_message_restores,
@@ -4300,7 +4302,10 @@ impl GitPanel {
                         FetchOptions::Remote(remote) => RemoteAction::Fetch(Some(remote)),
                     };
                     match remote_message {
-                        Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
+                        Ok(remote_message) => {
+                            this.last_fetched_at = Some(OffsetDateTime::now_utc());
+                            this.show_remote_output(action, remote_message, cx)
+                        }
                         Err(e) => {
                             log::error!("Error while fetching {:?}", e);
                             this.show_error_toast(action.name(), e, cx)
@@ -4460,7 +4465,10 @@ impl GitPanel {
 
             let action = RemoteAction::Pull(remote);
             this.update(cx, |this, cx| match remote_message {
-                Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
+                Ok(remote_message) => {
+                    this.last_fetched_at = Some(OffsetDateTime::now_utc());
+                    this.show_remote_output(action, remote_message, cx)
+                }
                 Err(e) => {
                     log::error!("Error while pulling {:?}", e);
                     this.show_error_toast(action.name(), e, cx)
@@ -5099,6 +5107,9 @@ impl GitPanel {
             }
         }
         self.active_repository = new_active_repository;
+        if active_repository_changed {
+            self.refresh_last_fetched(cx);
+        }
         self.reopen_commit_buffer(window, cx);
         self.preload_commit_history(cx);
         if self.active_tab == GitPanelTab::History {
@@ -5114,6 +5125,41 @@ impl GitPanel {
                     .ok();
             }
         });
+    }
+
+    fn refresh_last_fetched(&mut self, cx: &mut Context<Self>) {
+        let Some(repository) = self.active_repository.as_ref() else {
+            self.last_fetched_at = None;
+            return;
+        };
+        let fetch_head_path = repository
+            .read(cx)
+            .common_dir_abs_path
+            .join(git::FETCH_HEAD);
+        let fs = self.fs.clone();
+        cx.spawn(async move |this, cx| {
+            let fetched_at = match fs.metadata(&fetch_head_path).await {
+                Ok(Some(metadata)) => metadata
+                    .mtime
+                    .timestamp_for_user()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|duration| {
+                        OffsetDateTime::from_unix_timestamp(duration.as_secs() as i64).ok()
+                    }),
+                Ok(None) => None,
+                Err(error) => {
+                    log::debug!("Could not read FETCH_HEAD: {error:#}");
+                    None
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.last_fetched_at = fetched_at;
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
     }
 
     fn reopen_commit_buffer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -6414,6 +6460,17 @@ impl GitPanel {
             .map(|upstream| upstream.ref_name.to_string());
         let can_sync = self.can_push_and_pull(cx) && self.pending_remote_operation.is_none();
         let workspace = self.workspace.clone();
+        let fetched_label = self
+            .last_fetched_at
+            .map(|timestamp| {
+                time_format::format_localized_timestamp(
+                    timestamp,
+                    OffsetDateTime::now_utc(),
+                    time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
+                    time_format::TimestampFormat::Relative,
+                )
+            })
+            .unwrap_or_else(|| "just now".into());
         Some(
             v_flex()
                 .px(px(12.))
@@ -6429,23 +6486,31 @@ impl GitPanel {
                                 .height(px(36.).into())
                                 .full_width()
                                 .corner_radius(px(7.))
-                                .background(gpui::rgb(0x292B37).into())
-                                .custom_style(|this| {
-                                    this.border_1()
-                                        .border_color(gpui::rgb(0x424452))
-                                        .px(px(9.))
-                                        .gap(px(8.))
+                                .background(cx.theme().colors().surface_background)
+                                .custom_style({
+                                    let border = cx.theme().colors().border;
+                                    move |this| this.border_1().border_color(border).px(px(10.))
                                 })
-                                .child(Icon::new(IconName::GitBranch).size(IconSize::Small))
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(13.))
-                                        .line_height(px(16.))
-                                        .text_color(gpui::rgb(0xE4D7ED))
-                                        .child(branch_name),
-                                )
-                                .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                                    h_flex()
+                                        .w_full()
+                                        .gap(px(8.))
+                                        .child(Icon::new(IconName::GitBranch).size(IconSize::Small))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .text_left()
+                                                .text_size(px(13.))
+                                                .line_height(px(16.))
+                                                .text_color(cx.theme().colors().text_accent)
+                                                .truncate()
+                                                .child(branch_name),
+                                        )
+                                        .child(
+                                            Icon::new(IconName::ChevronDown).size(IconSize::XSmall),
+                                        ),
+                                ),
                         )
                         .menu(move |window, cx| {
                             Some(branch_picker::popover(
@@ -6461,63 +6526,62 @@ impl GitPanel {
                     h_flex()
                         .gap(px(8.))
                         .child(
-                            ButtonLike::new("git-pull")
-                                .size(ButtonSize::None)
-                                .height(px(34.).into())
-                                .corner_radius(px(6.))
-                                .custom_style(|this| {
-                                    this.flex_1()
-                                        .justify_center()
-                                        .border_1()
-                                        .border_color(gpui::rgb(0x404351))
-                                })
-                                .disabled(!can_sync)
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .line_height(px(16.))
-                                        .text_color(gpui::rgb(0xBEC1D1))
-                                        .child(
-                                            tracking
-                                                .map(|tracking| {
-                                                    format!("↓ Pull · {}", tracking.behind)
-                                                })
-                                                .unwrap_or_else(|| "↓ Pull".into()),
-                                        ),
-                                )
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.pull(false, window, cx)),
-                                ),
+                            div().flex_1().child(
+                                ButtonLike::new("git-pull")
+                                    .size(ButtonSize::None)
+                                    .height(px(34.).into())
+                                    .full_width()
+                                    .corner_radius(px(6.))
+                                    .style(ButtonStyle::Outlined)
+                                    .disabled(!can_sync)
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .line_height(px(16.))
+                                            .text_color(cx.theme().colors().text_muted)
+                                            .child(
+                                                tracking
+                                                    .map(|tracking| {
+                                                        format!("↓ Pull · {}", tracking.behind)
+                                                    })
+                                                    .unwrap_or_else(|| "↓ Pull".into()),
+                                            ),
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pull(false, window, cx)
+                                    })),
+                            ),
                         )
                         .child(
-                            ButtonLike::new("git-push")
-                                .size(ButtonSize::None)
-                                .height(px(34.).into())
-                                .corner_radius(px(6.))
-                                .custom_style(|this| {
-                                    this.flex_1()
-                                        .justify_center()
-                                        .border_1()
-                                        .border_color(gpui::rgb(0x544A60))
-                                })
-                                .background(gpui::rgb(0x393142).into())
-                                .disabled(!can_sync)
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .line_height(px(16.))
-                                        .text_color(gpui::rgb(0xDDCFEA))
-                                        .child(
-                                            tracking
-                                                .map(|tracking| {
-                                                    format!("↑ Push · {}", tracking.ahead)
-                                                })
-                                                .unwrap_or_else(|| "↑ Push".into()),
-                                        ),
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.push(false, false, window, cx)
-                                })),
+                            div().flex_1().child(
+                                ButtonLike::new("git-push")
+                                    .size(ButtonSize::None)
+                                    .height(px(34.).into())
+                                    .full_width()
+                                    .corner_radius(px(6.))
+                                    .background(cx.theme().colors().element_hover)
+                                    .custom_style({
+                                        let border = cx.theme().colors().border_selected;
+                                        move |this| this.border_1().border_color(border)
+                                    })
+                                    .disabled(!can_sync)
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .line_height(px(16.))
+                                            .text_color(cx.theme().colors().text_accent)
+                                            .child(
+                                                tracking
+                                                    .map(|tracking| {
+                                                        format!("↑ Push · {}", tracking.ahead)
+                                                    })
+                                                    .unwrap_or_else(|| "↑ Push".into()),
+                                            ),
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.push(false, false, window, cx)
+                                    })),
+                            ),
                         ),
                 )
                 .when_some(upstream_name, |this, upstream| {
@@ -6525,8 +6589,11 @@ impl GitPanel {
                         div()
                             .text_size(px(11.))
                             .line_height(px(14.))
-                            .text_color(gpui::rgb(0xA8AABB))
-                            .child(upstream.trim_start_matches("refs/remotes/").to_owned()),
+                            .text_color(cx.theme().colors().text_muted)
+                            .child(format!(
+                                "{} · Last fetched {fetched_label}",
+                                upstream.trim_start_matches("refs/remotes/")
+                            )),
                     )
                 })
                 .into_any_element(),
@@ -6535,7 +6602,7 @@ impl GitPanel {
 
     fn render_compact_commit(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut style = git_commit_editor_style(px(13.), cx);
-        style.background = gpui::rgb(0x2A2C38).into();
+        style.background = cx.theme().colors().surface_background;
         style.text.line_height = px(20.).into();
         let staged_count =
             self.tracked_staged_count + self.new_staged_count + self.conflicted_staged_count;
@@ -6564,7 +6631,7 @@ impl GitPanel {
                         div()
                             .text_size(px(12.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xCCD0DF))
+                            .text_color(cx.theme().colors().text)
                             .child(if staged_count > 0 {
                                 "Commit staged changes"
                             } else {
@@ -6584,11 +6651,11 @@ impl GitPanel {
                 div()
                     .id("compact-commit-editor")
                     .h(px(78.))
-                    .p(px(11.))
+                    .p(px(12.))
                     .rounded(px(8.))
                     .border_1()
-                    .border_color(gpui::rgb(0x555063))
-                    .bg(gpui::rgb(0x2A2C38))
+                    .border_color(cx.theme().colors().border)
+                    .bg(cx.theme().colors().surface_background)
                     .overflow_hidden()
                     .cursor_text()
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -6602,19 +6669,15 @@ impl GitPanel {
                     .height(px(34.).into())
                     .full_width()
                     .corner_radius(px(7.))
-                    .background(gpui::rgb(0x494054).into())
-                    .custom_style(|this| {
-                        this.justify_center()
-                            .border_1()
-                            .border_color(gpui::rgb(0x675978))
-                    })
+                    .style(ButtonStyle::Tinted(TintColor::Accent))
                     .disabled(!can_commit)
                     .tooltip(Tooltip::text(tooltip))
                     .child(
                         div()
                             .text_size(px(12.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xF0E6F7))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(cx.theme().colors().text_accent)
                             .child(title),
                     )
                     .on_click(
@@ -6626,7 +6689,7 @@ impl GitPanel {
                     div()
                         .text_size(px(11.))
                         .line_height(px(17.))
-                        .text_color(gpui::rgb(0xB0B2C3))
+                        .text_color(cx.theme().colors().text_muted)
                         .child(format!(
                             "{unstaged_count} unstaged {} will stay uncommitted.",
                             if unstaged_count == 1 { "file" } else { "files" }
@@ -8019,9 +8082,8 @@ impl GitPanel {
                                 return Empty.into_any_element();
                             };
                             match this.entries.get(logical_index) {
-                                Some(GitListEntry::Status(entry)) => div()
-                                    .pb(px(16.))
-                                    .child(this.render_status_entry(
+                                Some(GitListEntry::Status(entry)) => this
+                                    .render_status_entry(
                                         logical_index,
                                         entry,
                                         0,
@@ -8029,7 +8091,7 @@ impl GitPanel {
                                         repo.read(cx),
                                         window,
                                         cx,
-                                    ))
+                                    )
                                     .into_any_element(),
                                 Some(GitListEntry::Header(header)) => this.render_list_header(
                                     logical_index,
@@ -8240,7 +8302,7 @@ impl GitPanel {
             };
             return h_flex()
                 .id(id)
-                .h(px(40.))
+                .pt(px(8.))
                 .w_full()
                 .justify_between()
                 .child(
@@ -8250,7 +8312,7 @@ impl GitPanel {
                             div()
                                 .text_size(px(12.))
                                 .line_height(px(16.))
-                                .text_color(gpui::rgb(0xC4C7D7))
+                                .text_color(cx.theme().colors().text)
                                 .child(format!("{title} · {count}")),
                         )
                         .on_click(move |_, window, cx| {
@@ -8260,34 +8322,34 @@ impl GitPanel {
                             .log_err();
                         }),
                 )
-                .child(
-                    ButtonLike::new("change-section-stage")
-                        .size(ButtonSize::None)
-                        .disabled(!has_write_access || count == 0)
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .line_height(px(16.))
-                                .text_color(gpui::rgb(0xD7C4E7))
-                                .child(if section == Section::Unstaged {
-                                    "Stage all +"
-                                } else {
-                                    "Unstage all −"
-                                }),
-                        )
-                        .on_click(move |_, window, cx| {
-                            checkbox_weak
-                                .update(cx, |this, cx| {
-                                    this.toggle_staged_for_entry(
-                                        &GitListEntry::Header(GitHeaderEntry { header: section }),
-                                        stage_intent,
-                                        window,
-                                        cx,
-                                    );
-                                })
-                                .log_err();
-                        }),
-                )
+                .when(section == Section::Unstaged, |this| {
+                    this.child(
+                        ButtonLike::new("change-section-stage")
+                            .size(ButtonSize::None)
+                            .disabled(!has_write_access || count == 0)
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(cx.theme().colors().text_accent)
+                                    .child("Stage all +"),
+                            )
+                            .on_click(move |_, window, cx| {
+                                checkbox_weak
+                                    .update(cx, |this, cx| {
+                                        this.toggle_staged_for_entry(
+                                            &GitListEntry::Header(GitHeaderEntry {
+                                                header: section,
+                                            }),
+                                            stage_intent,
+                                            window,
+                                            cx,
+                                        );
+                                    })
+                                    .log_err();
+                            }),
+                    )
+                })
                 .into_any_element();
         }
 
@@ -8643,29 +8705,19 @@ impl GitPanel {
 
         let handle = cx.weak_entity();
 
-        let selected_bg_alpha = 0.08;
-        let marked_bg_alpha = 0.12;
-        let state_opacity_step = 0.04;
-
-        let info_color = cx.theme().status().info;
-
-        let base_bg = match (selected, marked) {
-            (true, true) => info_color.alpha(selected_bg_alpha + marked_bg_alpha),
-            (true, false) => gpui::rgb(0x393341).into(),
-            (false, true) => info_color.alpha(marked_bg_alpha),
-            _ => cx.theme().colors().ghost_element_background,
+        let colors = cx.theme().colors();
+        let base_bg = if selected {
+            colors.element_active
+        } else if marked {
+            colors.ghost_element_hover
+        } else {
+            colors.ghost_element_background
         };
 
         let (hover_bg, active_bg) = if selected {
-            (
-                info_color.alpha(selected_bg_alpha + state_opacity_step),
-                info_color.alpha(selected_bg_alpha + state_opacity_step * 2.0),
-            )
+            (colors.element_active, colors.element_active)
         } else {
-            (
-                cx.theme().colors().ghost_element_hover,
-                cx.theme().colors().ghost_element_active,
-            )
+            (colors.ghost_element_hover, colors.ghost_element_active)
         };
 
         let folder_indicator = settings.folder_indicator;
@@ -8734,11 +8786,11 @@ impl GitPanel {
                 "M"
             };
             let status_color = if has_conflict || is_deleted {
-                0xD6A4AA
+                cx.theme().colors().version_control_deleted
             } else if is_created {
-                0xA7C8B1
+                cx.theme().colors().version_control_added
             } else {
-                0xD8B887
+                cx.theme().colors().version_control_modified
             };
             let parent = entry
                 .parent_dir(path_style)
@@ -8754,7 +8806,7 @@ impl GitPanel {
                         .flex_none()
                         .text_size(px(12.))
                         .line_height(px(16.))
-                        .text_color(gpui::rgb(status_color))
+                        .text_color(status_color)
                         .child(status_letter),
                 )
                 .child(
@@ -8766,7 +8818,7 @@ impl GitPanel {
                             div()
                                 .text_size(px(12.))
                                 .line_height(px(16.))
-                                .text_color(gpui::rgb(0xE2E1EC))
+                                .text_color(cx.theme().colors().text)
                                 .overflow_hidden()
                                 .child(entry.display_name(path_style)),
                         )
@@ -8775,7 +8827,7 @@ impl GitPanel {
                                 div()
                                     .text_size(px(10.))
                                     .line_height(px(12.))
-                                    .text_color(gpui::rgb(0xA9ADBF))
+                                    .text_color(cx.theme().colors().text_muted)
                                     .overflow_hidden()
                                     .child(parent),
                             )
@@ -8797,7 +8849,7 @@ impl GitPanel {
                 }))
             })
             .w_full()
-            .px(px(7.))
+            .px(px(8.))
             .gap(px(7.))
             .rounded(px(6.))
             .border_1()
@@ -8891,7 +8943,11 @@ impl GitPanel {
                         .width(px(22.))
                         .height(px(22.).into())
                         .icon_size(IconSize::Small)
-                        .icon_color(Color::Custom(gpui::rgb(0xCFC3DE).into()))
+                        .icon_color(if stage_intent == StageIntent::Unstage {
+                            Color::Muted
+                        } else {
+                            Color::Accent
+                        })
                         .disabled(!has_write_access || resolved_conflict)
                         .tooltip(Tooltip::text(stage_intent.label(|| stage_status)))
                         .on_click(move |click, window, cx| {

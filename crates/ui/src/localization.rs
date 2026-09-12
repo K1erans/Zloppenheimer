@@ -259,20 +259,20 @@ pub fn localized(text: &'static str, cx: &App) -> SharedString {
             "Remote-Ordner öffnen",
             "Abrir carpeta remota",
         ],
-        "Choose where file links from conversations open." => [
-            "Choisissez où ouvrir les liens vers des fichiers dans les conversations.",
-            "Wähle, wo Dateilinks aus Unterhaltungen geöffnet werden.",
-            "Elige dónde abrir los enlaces a archivos de las conversaciones.",
+        "Where files and folders open by default." => [
+            "Où les fichiers et dossiers s’ouvrent par défaut.",
+            "Wo Dateien und Ordner standardmäßig geöffnet werden.",
+            "Dónde se abren archivos y carpetas de forma predeterminada.",
         ],
         "Default location for tasks started outside a project." => [
             "Emplacement par défaut des tâches sans projet.",
             "Standardordner für Aufgaben außerhalb eines Projekts.",
             "Ubicación predeterminada de las tareas sin proyecto.",
         ],
-        "Choose the language used in the app." => [
-            "Choisissez la langue de l’application.",
-            "Wähle die Sprache der App.",
-            "Elige el idioma de la aplicación.",
+        "Language used throughout the app." => [
+            "Langue utilisée dans l’application.",
+            "Sprache der gesamten App.",
+            "Idioma usado en toda la aplicación.",
         ],
         "Keep Zloppenheimer in the menu bar when the window is closed." => [
             "Garder Zloppenheimer dans la barre des menus lorsque la fenêtre est fermée.",
@@ -294,10 +294,10 @@ pub fn localized(text: &'static str, cx: &App) -> SharedString {
             "Computer während einer Agent-Aufgabe wach halten.",
             "Mantener el equipo activo mientras un agente ejecuta una tarea.",
         ],
-        "Use faster responses when supported by the selected model." => [
-            "Utiliser les réponses rapides si le modèle sélectionné le permet.",
-            "Schnellere Antworten verwenden, wenn das gewählte Modell sie unterstützt.",
-            "Usar respuestas más rápidas si el modelo seleccionado lo admite.",
+        "How quickly agents run across chats and background tasks." => [
+            "Vitesse des agents dans les conversations et les tâches en arrière-plan.",
+            "Wie schnell Agenten in Chats und Hintergrundaufgaben arbeiten.",
+            "Qué tan rápido actúan los agentes en chats y tareas en segundo plano.",
         ],
         "Agents can read and edit workspace files, and ask for additional access when needed." => [
             "Les agents peuvent lire et modifier les fichiers du projet et demander un accès supplémentaire si nécessaire.",
@@ -311,7 +311,7 @@ pub fn localized(text: &'static str, cx: &App) -> SharedString {
                 "Permitir que los agentes editen archivos fuera del proyecto y ejecuten comandos de red sin aprobación. Esto aumenta el riesgo de pérdida de datos o cambios inesperados.",
             ]
         }
-        "In app" => ["Dans l’application", "In der App", "En la aplicación"],
+        "Zloppenheimer" => ["Zloppenheimer", "Zloppenheimer", "Zloppenheimer"],
         "Default application" => [
             "Application par défaut",
             "Standardanwendung",

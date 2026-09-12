@@ -222,7 +222,11 @@ impl Render for ProfileSelector {
                         .color(Color::Warning),
                 )
             })
-            .end_icon(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted));
+            .end_icon(
+                Icon::new(icon)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            );
 
         let tooltip: Box<dyn Fn(&mut Window, &mut App) -> AnyView> = Box::new(Tooltip::element({
             move |_window, cx| {

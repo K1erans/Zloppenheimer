@@ -638,7 +638,7 @@ fn get_item_color(is_sticky: bool, cx: &App) -> ItemColors {
         } else {
             colors.element_hover
         },
-        marked: gpui::rgb(0x373342).into(),
+        marked: colors.element_active,
         focused: colors.panel_focused_border,
         drag_over: colors.drop_target_background,
     }
@@ -5789,16 +5789,7 @@ impl ProjectPanel {
             .is_some_and(|selection| selection.entry_id == entry_id);
 
         let file_name = details.filename.clone();
-        let icon_color = Color::Custom(
-            gpui::rgb(if kind.is_file() && file_name.ends_with(".rs") {
-                0xDCAD86
-            } else if kind.is_file() && file_name.ends_with(".md") {
-                0x9AC5DA
-            } else {
-                0xBDC3DA
-            })
-            .into(),
-        );
+        let icon_color = Color::Muted;
 
         let chevron = details.chevron.clone();
         let mut icon = details.icon.clone();
@@ -5809,13 +5800,7 @@ impl ProjectPanel {
             }
         }
 
-        let filename_text_color = if details.path.is_empty() {
-            Color::Custom(gpui::rgb(0xDEC08B).into())
-        } else if details.git_status == git::status::GitSummary::UNCHANGED && !details.is_ignored {
-            Color::Custom(gpui::rgb(0xBBC2DF).into())
-        } else {
-            details.filename_text_color
-        };
+        let filename_text_color = details.filename_text_color;
         let diagnostic_severity = details.diagnostic_severity;
         let diagnostic_mark = details.diagnostic_mark;
         let reserves_chevron_slot = details.reserves_chevron_slot;
@@ -6352,14 +6337,12 @@ impl ProjectPanel {
                                                 |(id, icon, tooltip, directory)| {
                                                     IconButton::new(id, icon)
                                                         .width(px(24.))
-                                                        .height(px(26.).into())
+                                                        .height(px(28.).into())
                                                         .corner_radius(px(4.))
                                                         .icon_size(IconSize::Custom(rems_from_px(
                                                             16_f32,
                                                         )))
-                                                        .icon_color(Color::Custom(
-                                                            gpui::rgb(0xDCE0E5).into(),
-                                                        ))
+                                                        .icon_color(Color::Muted)
                                                         .disabled(
                                                             self.project.read(cx).is_read_only(cx),
                                                         )
@@ -6395,7 +6378,7 @@ impl ProjectPanel {
                                             .height(px(26.).into())
                                             .corner_radius(px(4.))
                                             .icon_size(IconSize::Custom(rems_from_px(16_f32)))
-                                            .icon_color(Color::Custom(gpui::rgb(0xDCE0E5).into()))
+                                            .icon_color(Color::Muted)
                                             .tooltip(Tooltip::text(ui::localized(
                                                 "Open Folder",
                                                 cx,
@@ -6512,25 +6495,25 @@ impl ProjectPanel {
                                 }
                                 _ => Icon::from_path(chevron)
                                     .size(IconSize::Custom(rems_from_px(16_f32)))
-                                    .color(Color::Custom(gpui::rgb(0x939AAE).into()))
+                                    .color(Color::Muted)
                                     .into_any_element(),
                             });
 
                         match (chevron, icon_slot) {
                             (Some(chevron), Some(icon_slot)) => this.child(
                                 h_flex()
-                                    .w(px(36.))
+                                    .w(px(40.))
                                     .flex_none()
                                     .child(div().w(px(16.)).flex_none().child(chevron))
-                                    .child(div().w(px(20.)).flex_none().child(icon_slot)),
+                                    .child(div().w(px(24.)).flex_none().child(icon_slot)),
                             ),
                             (Some(chevron), None) => this.child(h_flex().child(chevron)),
                             (None, Some(icon_slot)) if reserves_chevron_slot => this.child(
                                 h_flex()
-                                    .w(px(36.))
+                                    .w(px(40.))
                                     .flex_none()
                                     .child(div().w(px(16.)).flex_none())
-                                    .child(div().w(px(20.)).flex_none().child(icon_slot)),
+                                    .child(div().w(px(24.)).flex_none().child(icon_slot)),
                             ),
                             (None, Some(icon_slot)) => this.child(icon_slot),
                             (None, None) => this,
@@ -7370,7 +7353,7 @@ impl Render for ProjectPanel {
             h_flex()
                 .id("project-panel")
                 .pt(px(6.))
-                .bg(gpui::rgb(0x242631))
+                .bg(cx.theme().colors().panel_background)
                 .group("project-panel")
                 .when(panel_settings.drag_and_drop, |this| {
                     this.on_drag_move(cx.listener(handle_drag_move::<ExternalPaths>))

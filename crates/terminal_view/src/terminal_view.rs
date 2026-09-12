@@ -1541,7 +1541,7 @@ impl Item for TerminalView {
                     .relative()
                     .child(
                         Label::new(title)
-                            .size(LabelSize::Custom(rems(16. / 16.)))
+                            .size(LabelSize::Custom(rems(14. / 16.)))
                             .single_line()
                             .color(params.text_color())
                             .when(self.is_renaming(), |this| this.alpha(0.)),

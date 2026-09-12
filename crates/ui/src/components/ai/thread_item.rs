@@ -367,7 +367,7 @@ impl RenderOnce for ThreadItem {
             title_slot
         } else if self.title_generating {
             Label::new(title)
-                .when(self.compact, |label| label.size(LabelSize::XSmall))
+                .when(self.compact, |label| label.size(LabelSize::Small))
                 .color(Color::Muted)
                 .with_animation(
                     "generating-title",
@@ -379,13 +379,13 @@ impl RenderOnce for ThreadItem {
                 .into_any_element()
         } else if highlight_positions.is_empty() {
             Label::new(title)
-                .when(self.compact, |label| label.size(LabelSize::XSmall))
+                .when(self.compact, |label| label.size(LabelSize::Small))
                 .when_some(self.title_label_color, |label, color| label.color(color))
                 .when(!opaque_window || self.compact, |label| label.truncate())
                 .into_any_element()
         } else {
             HighlightedLabel::new(title, highlight_positions)
-                .when(self.compact, |label| label.size(LabelSize::XSmall))
+                .when(self.compact, |label| label.size(LabelSize::Small))
                 .when_some(self.title_label_color, |label, color| label.color(color))
                 .when(!opaque_window || self.compact, |label| label.truncate())
                 .into_any_element()
@@ -446,9 +446,20 @@ impl RenderOnce for ThreadItem {
             .py_1()
             .px_1p5()
             .when(self.compact, |this| {
-                this.px(px(11.)).py(px(7.)).min_h(px(40.))
+                this.px(px(12.)).py(px(0.)).h(px(40.)).justify_center()
             })
             .when(self.selected, |s| s.bg(color.element_active))
+            .when(self.selected && self.compact, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.))
+                        .bg(color.border_focused),
+                )
+            })
             .border_1()
             .border_color(gpui::transparent_black())
             .when(self.focused, |s| s.border_color(color.border_focused))
@@ -484,7 +495,7 @@ impl RenderOnce for ThreadItem {
                                 .text_right()
                                 .text_size(px(11.))
                                 .line_height(px(14.))
-                                .text_color(color.text_muted)
+                                .text_color(cx.theme().colors().text_muted)
                                 .child(timestamp.clone()),
                         )
                     })

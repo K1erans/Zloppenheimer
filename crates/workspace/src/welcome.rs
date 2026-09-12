@@ -1,6 +1,6 @@
 use crate::{
-    NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation, Workspace,
-    WorkspaceSettings,
+    NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation,
+    ToggleWorkspaceSidebar, Workspace, WorkspaceSettings,
     item::{Item, ItemEvent},
     persistence::WorkspaceDb,
 };
@@ -16,9 +16,9 @@ use menu::{SelectNext, SelectPrevious};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{DefaultOpenBehavior, Settings};
-use ui::{IconButtonShape, KeyBinding, TintColor, Tooltip, prelude::*};
+use ui::{IconButtonShape, Tab, TabBar, Tooltip, prelude::*};
 use util::ResultExt;
-use zed_actions::{OpenOnboarding, assistant::ToggleFocus};
+use zed_actions::assistant::ToggleFocus;
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = welcome)]
@@ -91,6 +91,7 @@ pub struct WelcomePage {
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     fallback_to_recent_projects: bool,
+    embed_tab_strip: bool,
     recent_workspaces: Option<Vec<RecentWorkspace>>,
 }
 
@@ -98,6 +99,7 @@ impl WelcomePage {
     pub fn new(
         workspace: WeakEntity<Workspace>,
         fallback_to_recent_projects: bool,
+        embed_tab_strip: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -131,6 +133,7 @@ impl WelcomePage {
             workspace,
             focus_handle,
             fallback_to_recent_projects,
+            embed_tab_strip,
             recent_workspaces: None,
         }
     }
@@ -208,14 +211,67 @@ impl WelcomePage {
     /// thinking-budget and permission controls it mirrors belong to the panel
     /// itself, so the card deliberately shows no stand-ins for them and instead
     /// hands focus over when any part of it is clicked.
+    fn render_home_tab_strip(&self, _cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let focus_handle = self.focus_handle.clone();
+        TabBar::new("welcome-tab-bar")
+            .document_style(true)
+            .child(
+                Tab::new("welcome-new-thread")
+                    .document_style(true)
+                    .toggle_state(true)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap(px(10.))
+                            .child(
+                                Icon::new(IconName::Thread)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(13.))
+                                    .line_height(px(16.))
+                                    .text_ellipsis()
+                                    .child("New thread"),
+                            )
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size(IconSize::Indicator)
+                                    .color(Color::Muted),
+                            ),
+                    ),
+            )
+            .child(
+                IconButton::new("welcome-tab-new", IconName::Plus)
+                    .width(px(36.))
+                    .height(px(36.).into())
+                    .corner_radius(px(8.))
+                    .icon_size(IconSize::Custom(rems_from_px(18_f32)))
+                    .tooltip(Tooltip::text("New…"))
+                    .on_click({
+                        let focus_handle = focus_handle.clone();
+                        move |_, window, cx| {
+                            focus_handle.dispatch_action(&NewFile, window, cx);
+                        }
+                    }),
+            )
+    }
+
     fn render_prompt_panel(
         &self,
         tab_index: isize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let background = cx.theme().colors().elevated_surface_background;
-        let border = cx.theme().colors().border;
+        let surface = cx.theme().colors().surface_background;
+        let border = cx.theme().colors().border_selected;
         let border_hovered = cx.theme().colors().border_focused;
+        let send_background = cx.theme().colors().border_focused;
+        let send_icon = cx.theme().colors().editor_background;
 
         v_flex()
             .id("welcome-prompt-panel")
@@ -231,47 +287,53 @@ impl WelcomePage {
             .hover(move |style| style.border_color(border_hovered))
             .on_click(self.focus_agent_panel())
             .child(
-                div()
-                    .min_h(px(94.))
-                    .p(px(24.))
-                    .text_size(px(18.))
-                    .text_color(cx.theme().colors().text_placeholder)
-                    .child("Ask for changes, or describe an idea..."),
-            )
-            .child(
                 h_flex()
-                    .min_h(px(52.))
-                    .px(px(16.))
-                    .border_t_1()
-                    .border_color(border)
-                    .bg(cx.theme().colors().surface_background)
-                    .rounded_b(px(15.))
-                    .gap_1p5()
+                    .w_full()
+                    .min_h(px(94.))
+                    .items_start()
+                    .p(px(24.))
+                    .gap(px(18.))
                     .child(
-                        Label::new("Start a new thread")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(18.))
+                            .line_height(px(28.))
+                            .text_color(cx.theme().colors().text_placeholder)
+                            .child("Ask for changes, or describe an idea…"),
                     )
-                    .child(
-                        KeyBinding::for_action_in(&ToggleFocus, &self.focus_handle, cx)
-                            .size(rems_from_px(12_f32)),
-                    )
-                    .child(div().flex_1())
                     .child(
                         IconButton::new("welcome-prompt-attach", IconName::Paperclip)
-                            .icon_size(IconSize::Small)
+                            .size(ButtonSize::None)
+                            .width(px(32.))
+                            .height(px(36.).into())
+                            .icon_size(IconSize::Custom(rems_from_px(21_f32)))
                             .icon_color(Color::Muted)
                             .tooltip(Tooltip::text("Attach a File in the Agent Panel"))
                             .on_click(self.focus_agent_panel()),
                     )
                     .child(
                         IconButton::new("welcome-prompt-send", IconName::ArrowUp)
-                            .shape(IconButtonShape::Square)
-                            .icon_size(IconSize::Small)
-                            .style(ButtonStyle::Tinted(TintColor::Accent))
+                            .shape(IconButtonShape::Circle)
+                            .width(px(36.))
+                            .size(ButtonSize::None)
+                            .icon_size(IconSize::Custom(rems_from_px(21_f32)))
+                            .background(send_background)
+                            .icon_color(Color::Custom(send_icon))
                             .tooltip(Tooltip::text("Open the Agent Panel"))
                             .on_click(self.focus_agent_panel()),
                     ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .h(px(52.))
+                    .px(px(16.))
+                    .gap(px(12.))
+                    .border_t_1()
+                    .border_color(cx.theme().colors().border)
+                    .bg(surface)
+                    .child(div().flex_1()),
             )
     }
 
@@ -358,7 +420,16 @@ impl Render for WelcomePage {
                 "Clone Repository",
                 GitClone.boxed_clone(),
                 tab_index(),
-            ));
+            ))
+            .when(ai_enabled, |this| {
+                this.child(self.render_action_button(
+                    "welcome-open-sidebar",
+                    IconName::ThreadsSidebarLeftClosed,
+                    "Threads",
+                    ToggleWorkspaceSidebar.boxed_clone(),
+                    tab_index(),
+                ))
+            });
 
         let recent_projects = self
             .recent_workspaces
@@ -376,7 +447,6 @@ impl Render for WelcomePage {
                 )
             })
             .collect::<Vec<_>>();
-        next_tab_index += recent_projects.len() as isize;
 
         let showing_recent_projects =
             self.fallback_to_recent_projects && !recent_projects.is_empty();
@@ -389,20 +459,24 @@ impl Render for WelcomePage {
             .on_action(cx.listener(Self::open_recent_project))
             .size_full()
             .bg(background)
-            .justify_center()
+            .when(self.embed_tab_strip && ai_enabled, |this| {
+                this.flex().flex_col().child(self.render_home_tab_strip(cx))
+            })
             .child(
                 v_flex()
                     .id("welcome-content")
+                    .flex_1()
                     .size_full()
-                    .p_8()
-                    .overflow_y_scroll()
+                    .when(ai_enabled, |this| this.pb(px(72.)))
+                    .when(!ai_enabled, |this| this.p_8().overflow_y_scroll())
+                    .justify_center()
                     .child(
                         v_flex()
                             .w_full()
                             .flex_none()
                             // Auto margins center spare space without moving
                             // overflowing content above the scroll origin.
-                            .my_auto()
+                            .when(!ai_enabled, |this| this.my_auto())
                             .items_center()
                             .gap(px(26.))
                             .when(!ai_enabled, |this| {
@@ -432,18 +506,35 @@ impl Render for WelcomePage {
                                             .text_center()
                                             .text_size(px(28.))
                                             .line_height(px(36.))
+                                            .tracking(rems(-0.035))
                                             .text_color(cx.theme().colors().text)
                                             .font_weight(FontWeight::MEDIUM)
                                             .child("What are we building?"),
                                     )
                                     .child(
-                                        Label::new(format!("Start a thread in {project_name}."))
-                                            .color(Color::Muted),
+                                        div()
+                                            .text_size(px(14.))
+                                            .line_height(px(22.))
+                                            .text_color(cx.theme().colors().text_placeholder)
+                                            .child(format!("Start a thread in {project_name}.")),
                                     ),
                             )
                             .children(prompt_panel)
-                            .child(action_buttons)
-                            .when(showing_recent_projects, |this| {
+                            .when(ai_enabled, |this| {
+                                this.child(
+                                    h_flex()
+                                        .gap(px(8.))
+                                        .justify_center()
+                                        .text_size(px(12.))
+                                        .line_height(px(18.))
+                                        .text_color(cx.theme().colors().text_muted)
+                                        .child("Enter to send")
+                                        .child("·")
+                                        .child("Shift + Enter for a new line"),
+                                )
+                            })
+                            .when(!ai_enabled, |this| this.child(action_buttons))
+                            .when(!ai_enabled && showing_recent_projects, |this| {
                                 this.child(
                                     v_flex()
                                         .w(px(CONTENT_WIDTH))
@@ -457,18 +548,6 @@ impl Render for WelcomePage {
                                             ),
                                         )
                                         .children(recent_projects),
-                                )
-                            })
-                            .when(!self.fallback_to_recent_projects, |this| {
-                                this.child(
-                                    Button::new("welcome-exit", "Return to Onboarding")
-                                        .tab_index(next_tab_index)
-                                        .label_size(LabelSize::Small)
-                                        .color(Color::Muted)
-                                        .on_click(|_, window, cx| {
-                                            window
-                                                .dispatch_action(OpenOnboarding.boxed_clone(), cx);
-                                        }),
                                 )
                             }),
                     ),
@@ -488,7 +567,11 @@ impl Item for WelcomePage {
     type Event = ItemEvent;
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        "Welcome".into()
+        "New thread".into()
+    }
+
+    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
+        Some(Icon::new(IconName::Thread).size(IconSize::Small))
     }
 
     fn telemetry_event_text(&self) -> Option<&'static str> {
@@ -538,7 +621,7 @@ impl crate::SerializableItem for WelcomePage {
             .is_some_and(|is_open| is_open)
         {
             Task::ready(Ok(
-                cx.new(|cx| WelcomePage::new(workspace, false, window, cx))
+                cx.new(|cx| WelcomePage::new(workspace, true, false, window, cx))
             ))
         } else {
             Task::ready(Err(anyhow::anyhow!("No welcome page to deserialize")))

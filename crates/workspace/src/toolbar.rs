@@ -136,21 +136,23 @@ impl Render for Toolbar {
                 this.py_0()
                     .px(px(22.))
                     .gap_0()
-                    .bg(gpui::rgb(0x232530))
-                    .border_color(gpui::rgb(0x323541))
+                    .bg(cx.theme().colors().toolbar_background)
+                    .border_color(cx.theme().colors().border_variant)
             })
             .when(has_left_items || has_right_items, |this| {
                 this.child(
                     h_flex()
                         .items_start()
-                        .when(file_toolbar, |this| this.h(px(31.)).items_center())
+                        .when(file_toolbar, |this| {
+                            this.h(px(32.)).items_center().gap(px(10.))
+                        })
                         .justify_between()
                         .gap(DynamicSpacing::Base08.rems(cx))
                         .when(has_left_items, |this| {
                             this.child(
                                 h_flex()
                                     .min_h_8()
-                                    .when(file_toolbar, |this| this.min_h(px(0.)).h(px(31.)))
+                                    .when(file_toolbar, |this| this.min_h(px(0.)).h(px(32.)))
                                     .flex_auto()
                                     .justify_start()
                                     .overflow_x_hidden()
@@ -161,7 +163,7 @@ impl Render for Toolbar {
                             this.child(
                                 h_flex()
                                     .h_8()
-                                    .when(file_toolbar, |this| this.h(px(31.)))
+                                    .when(file_toolbar, |this| this.h(px(32.)))
                                     .flex_row_reverse()
                                     .when(has_left_items, |this| this.flex_none())
                                     .justify_end()

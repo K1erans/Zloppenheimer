@@ -1,4 +1,4 @@
-use gpui::{AnyElement, ScrollHandle};
+use gpui::{AnyElement, ScrollHandle, WindowControlArea};
 use smallvec::SmallVec;
 
 use crate::Tab;
@@ -13,6 +13,7 @@ pub struct TabBar {
     scroll_handle: Option<ScrollHandle>,
     document_style: bool,
     terminal_style: bool,
+    leading_padding: Option<Pixels>,
 }
 
 impl TabBar {
@@ -25,6 +26,7 @@ impl TabBar {
             scroll_handle: None,
             document_style: false,
             terminal_style: false,
+            leading_padding: None,
         }
     }
 
@@ -40,6 +42,11 @@ impl TabBar {
 
     pub fn document_style(mut self, enabled: bool) -> Self {
         self.document_style = enabled;
+        self
+    }
+
+    pub fn leading_padding(mut self, padding: impl Into<Option<Pixels>>) -> Self {
+        self.leading_padding = padding.into();
         self
     }
 
@@ -115,7 +122,29 @@ impl RenderOnce for TabBar {
             .when(self.document_style, |this| this.h(px(48.)))
             .bg(cx.theme().colors().tab_bar_background)
             .when(self.terminal_style, |this| {
-                this.h(px(36.)).bg(gpui::rgb(0x232530))
+                this.h(px(36.)).bg(cx.theme().colors().editor_background)
+            })
+            .when_some(self.leading_padding, |this, padding| {
+                this.child(
+                    div()
+                        .id("tab-bar-traffic-light-padding")
+                        .w(padding)
+                        .h_full()
+                        .flex_none()
+                        .border_b_1()
+                        .border_color(cx.theme().colors().border)
+                        .window_control_area(WindowControlArea::Drag)
+                        .on_click(|event, window, _cx| {
+                            if event.click_count() == 2 {
+                                window.titlebar_double_click();
+                            }
+                        })
+                        .on_mouse_move(|event, window, _cx| {
+                            if event.dragging() {
+                                window.start_window_move();
+                            }
+                        }),
+                )
             })
             .when(!self.start_children.is_empty(), |this| {
                 this.child(

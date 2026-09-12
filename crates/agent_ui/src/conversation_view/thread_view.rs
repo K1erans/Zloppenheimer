@@ -33,7 +33,7 @@ use crate::unicode_confusables;
 use db::kvp::KeyValueStore;
 use gpui::Stateful;
 use gpui::TaskExt;
-use gpui::{List, rgb};
+use gpui::List;
 use heapless::Vec as ArrayVec;
 use language_model::{
     FastModeConfirmation, LanguageModel, LanguageModelEffortLevel, LanguageModelId,
@@ -585,7 +585,7 @@ pub struct ThreadView {
     pub permission_dropdown_handle: PopoverMenuHandle<ContextMenu>,
     pub thread_retry_status: Option<RetryStatus>,
     pub response_cancelled: bool,
-    composer_has_messages: Option<bool>,
+    composer_placeholder: Option<SharedString>,
     pub(super) thread_error: Option<ThreadError>,
     pub thread_error_markdown: Option<Entity<Markdown>>,
     pub token_limit_callout_dismissed: bool,
@@ -1004,7 +1004,7 @@ impl ThreadView {
             permission_dropdown_handle: PopoverMenuHandle::default(),
             thread_retry_status: None,
             response_cancelled: false,
-            composer_has_messages: None,
+            composer_placeholder: None,
             thread_error: None,
             thread_error_markdown: None,
             token_limit_callout_dismissed: false,
@@ -3027,7 +3027,7 @@ impl ThreadView {
         if let Some(fallback_model) = acp_thread::refusal_fallback_model_from_meta(&state.meta) {
             return Some(
                 Callout::new()
-                    .conversation_card(rgb(0xC9B7DD).into())
+                    .conversation_card(cx.theme().colors().text_accent)
                     .icon(IconName::Warning)
                     .severity(Severity::Warning)
                     .title(state.last_error.clone())
@@ -3052,35 +3052,17 @@ impl ThreadView {
             return None;
         }
 
-        let next_attempt_in_secs = next_attempt_in.as_secs() + 1;
-
-        let retry_message = if state.max_attempts == 1 {
-            if next_attempt_in_secs == 1 {
-                "Retrying. Next attempt in 1 second.".to_string()
-            } else {
-                format!("Retrying. Next attempt in {next_attempt_in_secs} seconds.")
-            }
-        } else if next_attempt_in_secs == 1 {
-            format!(
-                "Retrying. Next attempt in 1 second (Attempt {} of {}).",
-                state.attempt, state.max_attempts,
-            )
-        } else {
-            format!(
-                "Retrying. Next attempt in {next_attempt_in_secs} seconds (Attempt {} of {}).",
-                state.attempt, state.max_attempts,
-            )
-        };
-
         Some(
             Callout::new()
-                .conversation_card(rgb(0xC9B7DD).into())
+                .conversation_card(cx.theme().colors().text_accent)
                 .icon(IconName::Warning)
                 .severity(Severity::Warning)
-                .title("Retrying response…")
-                .description(format!("{}\n{}", state.last_error, retry_message))
+                .title("Retrying response...")
+                .description(
+                    "Reconnecting to the provider and sending your original message. No files have changed yet.",
+                )
                 .actions_slot(
-                    Self::response_action_button("stop-retry", "Stop", true)
+                    Self::response_action_button("stop-retry", "Stop", true, cx)
                         .on_click(cx.listener(|this, _, _, cx| this.cancel_generation(cx))),
                 ),
         )
@@ -3181,21 +3163,23 @@ impl ThreadView {
                     h_flex()
                         .h(px(39.))
                         .px(px(16.))
-                        .gap(px(12.))
                         .border_b_1()
-                        .border_color(rgb(0x383B48))
+                        .border_color(cx.theme().colors().border)
                         .child(
-                            Icon::new(IconName::File)
-                                .size(IconSize::Custom(rems_from_px(16_f32)))
-                                .color(Color::Custom(rgb(0xACB0C2).into())),
+                            div().w(px(26.)).flex_none().child(
+                                Icon::new(IconName::File)
+                                    .size(IconSize::Custom(rems_from_px(15_f32)))
+                                    .color(Color::Muted),
+                            ),
                         )
                         .child(
                             div()
-                                .w(px(173.))
+                                .w(px(185.))
+                                .flex_none()
                                 .min_w_0()
                                 .text_size(px(12.))
-                                .line_height(px(18.))
-                                .text_color(rgb(0xD5D7E2))
+                                .line_height(px(16.))
+                                .text_color(cx.theme().colors().text)
                                 .truncate()
                                 .child(name),
                         )
@@ -3204,34 +3188,49 @@ impl ThreadView {
                                 .flex_1()
                                 .min_w_0()
                                 .text_size(px(11.))
-                                .line_height(px(16.))
-                                .text_color(rgb(0x9498AB))
+                                .line_height(px(14.))
+                                .text_color(cx.theme().colors().text_muted)
                                 .truncate()
                                 .child(directory),
                         )
                         .child(
-                            DiffStat::new(
-                                ("edited-file-stat", index),
-                                stats.lines_added as usize,
-                                stats.lines_removed as usize,
-                            )
-                            .label_size(LabelSize::Custom(rems_from_px(12_f32))),
+                            div()
+                                .w(px(40.))
+                                .flex_none()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .text_color(cx.theme().colors().version_control_added)
+                                .text_align(gpui::TextAlign::Right)
+                                .child(format!("+{}", stats.lines_added)),
+                        )
+                        .child(
+                            div()
+                                .w(px(40.))
+                                .flex_none()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .text_color(cx.theme().colors().version_control_deleted)
+                                .text_align(gpui::TextAlign::Right)
+                                .child(format!("−{}", stats.lines_removed)),
                         )
                         .child(
                             h_flex()
+                                .w(px(152.))
+                                .flex_none()
+                                .justify_end()
                                 .gap(px(6.))
                                 .child(
                                     ButtonLike::new(("view-edited-file", index))
                                         .size(ButtonSize::None)
+                                        .width(px(65.))
                                         .height(px(25.).into())
                                         .corner_radius(px(5.))
-                                        .custom_style(|this| {
-                                            this.px(px(9.)).border_1().border_color(rgb(0x454957))
-                                        })
+                                        .style(ButtonStyle::Outlined)
                                         .child(
                                             div()
                                                 .text_size(px(11.))
                                                 .line_height(px(16.))
+                                                .text_color(cx.theme().colors().text)
                                                 .child("View file"),
                                         )
                                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -3241,16 +3240,19 @@ impl ThreadView {
                                 .child(
                                     ButtonLike::new(("view-edited-diff", index))
                                         .size(ButtonSize::None)
+                                        .width(px(65.))
                                         .height(px(25.).into())
                                         .corner_radius(px(5.))
-                                        .background(rgb(0x393142).into())
-                                        .custom_style(|this| {
-                                            this.px(px(9.)).border_1().border_color(rgb(0x544A60))
+                                        .background(cx.theme().colors().element_hover)
+                                        .custom_style({
+                                            let border = cx.theme().colors().border_selected;
+                                            move |this| this.border_1().border_color(border)
                                         })
                                         .child(
                                             div()
                                                 .text_size(px(11.))
                                                 .line_height(px(16.))
+                                                .text_color(cx.theme().colors().text_accent)
                                                 .child("View diff"),
                                         )
                                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -3268,70 +3270,91 @@ impl ThreadView {
                 .mb(px(12.))
                 .rounded(px(10.))
                 .border_1()
-                .border_color(rgb(0x414451))
-                .bg(rgb(0x262933))
+                .border_color(cx.theme().colors().border)
+                .bg(cx.theme().colors().elevated_surface_background)
                 .overflow_hidden()
                 .child(
                     h_flex()
-                        .h(px(39.))
+                        .h(px(40.))
                         .px(px(16.))
-                        .gap(px(10.))
+                        .gap(px(8.))
                         .border_b_1()
-                        .border_color(rgb(0x383B48))
+                        .border_color(cx.theme().colors().border)
                         .child(
                             div()
                                 .flex_1()
                                 .text_size(px(13.))
-                                .line_height(px(18.))
-                                .text_color(rgb(0xDFDFE8))
+                                .line_height(px(16.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(cx.theme().colors().text)
                                 .child(if generating {
                                     "Files edited so far"
                                 } else {
-                                    "Files edited"
+                                    "Changed files"
                                 }),
                         )
                         .child(
                             div()
                                 .text_size(px(12.))
-                                .line_height(px(18.))
-                                .text_color(rgb(0xA8ACBD))
+                                .line_height(px(16.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(cx.theme().colors().text_muted)
                                 .child(format!("{} files", rows.len())),
                         )
                         .child(
-                            DiffStat::new(
-                                "edited-files-total",
-                                stats.lines_added as usize,
-                                stats.lines_removed as usize,
-                            )
-                            .label_size(LabelSize::Custom(rems_from_px(12_f32))),
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(cx.theme().colors().version_control_added)
+                                .child(format!("+{}", stats.lines_added)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(cx.theme().colors().version_control_deleted)
+                                .child(format!("−{}", stats.lines_removed)),
                         ),
                 )
                 .children(rows)
                 .child(
                     h_flex()
-                        .h(px(49.))
+                        .h(px(48.))
                         .px(px(12.))
-                        .justify_between()
+                        .gap(px(10.))
                         .child(
                             ButtonLike::new("view-thread-changes")
                                 .size(ButtonSize::None)
                                 .height(px(28.).into())
-                                .corner_radius(px(5.))
-                                .background(rgb(0x41364E).into())
-                                .custom_style(|this| {
-                                    this.px(px(12.)).border_1().border_color(rgb(0x5A4C65))
+                                .corner_radius(px(6.))
+                                .background(cx.theme().colors().element_hover)
+                                .custom_style({
+                                    let border = cx.theme().colors().border_selected;
+                                    move |this| {
+                                        this.border_1()
+                                            .border_color(border)
+                                            .px(px(12.))
+                                    }
                                 })
-                                .child(div().text_size(px(12.)).line_height(px(16.)).child(
-                                    if generating {
-                                        "View changes so far"
-                                    } else {
-                                        "View changes"
-                                    },
-                                ))
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .line_height(px(16.))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(cx.theme().colors().text_accent)
+                                        .child(if generating {
+                                            "View changes so far"
+                                        } else {
+                                            "Review changes"
+                                        }),
+                                )
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(OpenAgentDiff.boxed_clone(), cx)
                                 }),
                         )
+                        .child(div().flex_1())
                         .child(
                             ButtonLike::new("open-all-edited-files")
                                 .size(ButtonSize::None)
@@ -3340,7 +3363,7 @@ impl ThreadView {
                                     div()
                                         .text_size(px(12.))
                                         .line_height(px(16.))
-                                        .text_color(rgb(0xA8ACBD))
+                                        .text_color(cx.theme().colors().text_muted)
                                         .child("Open all files ↗"),
                                 )
                                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -4151,10 +4174,18 @@ impl ThreadView {
             PopoverMenu::new("composer-checkout-menu")
                 .trigger_with_tooltip(
                     Button::new("composer-checkout", label)
-                        .label_size(LabelSize::XSmall)
+                        .label_size(LabelSize::Small)
                         .color(Color::Muted)
-                        .start_icon(Icon::new(IconName::Folder).size(IconSize::Small))
-                        .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                        .start_icon(
+                            Icon::new(IconName::Folder)
+                                .size(IconSize::Custom(rems_from_px(15_f32)))
+                                .color(Color::Muted),
+                        )
+                        .end_icon(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        ),
                     Tooltip::text("Choose a workspace"),
                 )
                 .menu(move |window, cx| {
@@ -4201,10 +4232,18 @@ impl ThreadView {
             PopoverMenu::new("composer-branch-menu")
                 .trigger_with_tooltip(
                     Button::new("composer-branch", branch_name)
-                        .label_size(LabelSize::XSmall)
+                        .label_size(LabelSize::Small)
                         .color(Color::Muted)
-                        .start_icon(Icon::new(IconName::GitBranch).size(IconSize::Small))
-                        .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                        .start_icon(
+                            Icon::new(IconName::GitBranch)
+                                .size(IconSize::Custom(rems_from_px(15_f32)))
+                                .color(Color::Muted),
+                        )
+                        .end_icon(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        ),
                     Tooltip::text("Choose a branch"),
                 )
                 .menu(move |window, cx| {
@@ -4241,19 +4280,28 @@ impl ThreadView {
 
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         let has_messages = self.list_state.item_count() > 0;
-        if self.composer_has_messages != Some(has_messages) {
-            self.composer_has_messages = Some(has_messages);
+        let is_generating = self.thread.read(cx).status() != ThreadStatus::Idle;
+        let composer_focused = focus_handle.is_focused(window);
+        let placeholder: SharedString = if !has_messages {
+            MESSAGE_EDITOR_PLACEHOLDER.into()
+        } else if self.thread_retry_status.is_some() {
+            "Ask a follow-up…".into()
+        } else if is_generating {
+            format!(
+                "Add a follow-up while {} works…",
+                self.agent_display_name
+            )
+            .into()
+        } else if self.response_cancelled {
+            "Send a follow-up or continue this response…".into()
+        } else {
+            "Ask a follow-up…".into()
+        };
+        if self.composer_placeholder.as_ref() != Some(&placeholder) {
+            self.composer_placeholder = Some(placeholder.clone());
             self.message_editor.update(cx, |editor, cx| {
                 editor.set_text_layout(px(if has_messages { 16. } else { 18. }), px(28.), cx);
-                editor.set_placeholder_text(
-                    if has_messages {
-                        "Ask a follow-up…"
-                    } else {
-                        MESSAGE_EDITOR_PLACEHOLDER
-                    },
-                    window,
-                    cx,
-                );
+                editor.set_placeholder_text(placeholder.as_ref(), window, cx);
             });
         }
         let fills_container = editor_expanded;
@@ -4298,7 +4346,7 @@ impl ThreadView {
                     .w(px(1.))
                     .h(px(16.))
                     .flex_none()
-                    .bg(gpui::rgb(0x494B5A))
+                    .bg(cx.theme().colors().border)
                     .into_any_element()
             });
             divider.into_iter().chain(std::iter::once(control))
@@ -4335,6 +4383,7 @@ impl ThreadView {
                             div()
                                 .text_size(px(28.))
                                 .line_height(px(36.))
+                                .tracking(rems(-0.035))
                                 .text_color(cx.theme().colors().text)
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .child("What are we building?"),
@@ -4356,12 +4405,31 @@ impl ThreadView {
                     .flex_shrink_1()
                     .flex_grow_0()
                     .when(fills_container, |this| this.flex_1().min_h_0())
-                    .justify_between()
-                    .border_1()
-                    .border_color(cx.theme().colors().border_selected)
                     .rounded(px(16.))
-                    .overflow_hidden()
-                    .bg(cx.theme().colors().elevated_surface_background)
+                    .when(composer_focused, |this| {
+                        this.shadow(vec![
+                            gpui::BoxShadow::new(
+                                px(0.),
+                                px(0.),
+                                cx.theme().colors().border_focused.opacity(0.1),
+                            )
+                                .spread_radius(px(2.)),
+                        ])
+                    })
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .when(fills_container, |this| this.flex_1().min_h_0())
+                            .justify_between()
+                            .border_1()
+                            .border_color(if composer_focused {
+                                cx.theme().colors().border_focused
+                            } else {
+                                cx.theme().colors().border_selected
+                            })
+                            .rounded(px(16.))
+                            .overflow_hidden()
+                            .bg(cx.theme().colors().elevated_surface_background)
                     .child(
                         v_flex()
                             .relative()
@@ -4422,13 +4490,11 @@ impl ThreadView {
                         h_flex()
                             .w_full()
                             .min_w_0()
-                            .min_h(px(52.))
+                            .h(px(52.))
                             .px(px(16.))
-                            .py(px(8.))
                             .border_t_1()
                             .border_color(cx.theme().colors().border)
                             .bg(cx.theme().colors().surface_background)
-                            .rounded_b(px(15.))
                             .flex_none()
                             .flex_wrap()
                             .justify_between()
@@ -4451,22 +4517,26 @@ impl ThreadView {
                                     .children(self.render_branch_picker(cx)),
                             ),
                     ),
+                    ),
             )
             .child(
                 h_flex()
                     .gap(px(8.))
+                    .justify_center()
                     .text_size(px(12.))
                     .line_height(px(18.))
                     .text_color(cx.theme().colors().text_muted)
                     .map(|this| {
-                        if self.thread.read(cx).status() != ThreadStatus::Idle {
-                            this.child("Agent is working")
-                                .child("·")
-                                .child("Esc to stop")
-                        } else {
+                        if self.thread_retry_status.is_some()
+                            || self.thread.read(cx).status() == ThreadStatus::Idle
+                        {
                             this.child("Enter to send")
                                 .child("·")
                                 .child("Shift + Enter for a new line")
+                        } else {
+                            this.child(format!("{} is working", self.agent_display_name))
+                                .child("·")
+                                .child("Esc to stop")
                         }
                     }),
             )
@@ -5161,6 +5231,7 @@ impl ThreadView {
                 self.render_effort_selector(
                     effort_levels,
                     thread.thinking_effort().cloned(),
+                    model.max_token_count(),
                     true,
                     cx,
                 )
@@ -5232,6 +5303,7 @@ impl ThreadView {
         let right_btn = self.render_effort_selector(
             model.supported_effort_levels(),
             thread.thinking_effort().cloned(),
+            model.max_token_count(),
             false,
             cx,
         );
@@ -5247,6 +5319,7 @@ impl ThreadView {
         &self,
         supported_effort_levels: Vec<LanguageModelEffortLevel>,
         selected_effort: Option<String>,
+        max_token_count: u64,
         standalone: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -5266,15 +5339,22 @@ impl ThreadView {
             })
             .or(default_effort_level);
 
-        let label = selected
+        let effort_name = selected
             .clone()
-            .map_or("Select Effort".into(), |effort| effort.name);
-
-        let (label_color, icon) = if self.thinking_effort_menu_handle.is_deployed() {
-            (Color::Accent, IconName::ChevronUp)
+            .map_or(SharedString::from("Select Effort"), |effort| effort.name);
+        let label = format!(
+            "{} · {}",
+            effort_name,
+            crate::humanize_token_count(max_token_count)
+        );
+        let deployed = self.thinking_effort_menu_handle.is_deployed();
+        let icon = if deployed {
+            IconName::ChevronUp
         } else {
-            (Color::Muted, IconName::ChevronDown)
+            IconName::ChevronDown
         };
+        let label_color = Color::Muted;
+        let chevron_color = Color::Muted;
 
         let focus_handle = self.message_editor.focus_handle(cx);
         let show_cycle_row = supported_effort_levels.len() > 1;
@@ -5315,31 +5395,26 @@ impl ThreadView {
         });
 
         let trigger = if standalone {
-            ButtonLike::new("effort-selector-trigger").child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        Icon::new(IconName::ThinkingMode)
-                            .size(IconSize::Small)
-                            .color(Color::Accent),
-                    )
-                    .child(Label::new(label).size(LabelSize::Small).color(label_color))
-                    .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted)),
-            )
+            ButtonLike::new("effort-selector-trigger")
         } else {
             ButtonLike::new_rounded_right("effort-selector-trigger")
+        }
+        .when(deployed, |this| {
+            this.background(cx.theme().colors().element_hover)
+                .corner_radius(px(4.))
+        })
+        .child(
+            h_flex()
+                .gap(px(7.))
                 .child(Label::new(label).size(LabelSize::Small).color(label_color))
-                .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
-        };
+                .child(Icon::new(icon).size(IconSize::XSmall).color(chevron_color)),
+        );
 
         PopoverMenu::new("effort-selector")
-            .trigger_with_tooltip(
-                trigger.selected_style(ButtonStyle::Tinted(TintColor::Accent)),
-                tooltip,
-            )
+            .trigger_with_tooltip(trigger, tooltip)
             .menu(move |window, cx| {
                 Some(ContextMenu::build(window, cx, |mut menu, _window, _cx| {
-                    menu = menu.dropdown_style(px(330.)).header("Reasoning effort");
+                    menu = menu.dropdown_style(px(330.)).header("Reasoning");
 
                     for effort_level in supported_effort_levels.clone() {
                         let is_selected = selected
@@ -6276,14 +6351,14 @@ impl ThreadView {
                                     .px(px(20.))
                                     .rounded(px(14.))
                                     .rounded_br(px(4.))
-                                    .bg(gpui::rgb(0x34313F))
+                                    .bg(cx.theme().colors().element_selected)
                                     .border_1()
                                     .when(is_indented, |this| {
                                         this.py_2().px_2().when(opaque_window, |this| {
                                             this.shadow_sm()
                                         })
                                     })
-                                    .border_color(gpui::rgb(0x464152))
+                                    .border_color(cx.theme().colors().border_selected)
                                     .map(|this| {
                                         if !is_editable {
                                             if is_subagent {
@@ -6850,9 +6925,15 @@ impl ThreadView {
         }
 
         let copy_response_button = copy_response_index.map(|response_index| {
-            IconButton::new(("copy_agent_response", entry_ix), IconName::Copy)
-                .icon_size(IconSize::Small)
-                .icon_color(Color::Muted)
+            ButtonLike::new(("copy_agent_response", entry_ix))
+                .size(ButtonSize::None)
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(cx.theme().colors().text_muted)
+                        .child("Copy"),
+                )
                 .tooltip(Tooltip::text("Copy This Agent Response"))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let entries = this.thread.read(cx).entries();
@@ -6860,6 +6941,22 @@ impl ThreadView {
                     {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
+                }))
+        });
+
+        let retry_response_button = copy_response_index.map(|_response_index| {
+            ButtonLike::new(("retry_agent_response", entry_ix))
+                .size(ButtonSize::None)
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(cx.theme().colors().text_muted)
+                        .child("Retry"),
+                )
+                .tooltip(Tooltip::text("Retry This Agent Response"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.retry_generation(cx);
                 }))
         });
 
@@ -6983,28 +7080,34 @@ impl ThreadView {
             .py_1p5()
             .px_4()
             .justify_end()
-            .opacity(0.4)
-            .hover(|s| s.opacity(1.))
-            .when(
-                last_turn_tokens_label.is_some() || last_turn_clock.is_some(),
-                |this| {
-                    this.child(
-                        h_flex()
-                            .px_1()
-                            .gap_1()
-                            .when_some(last_turn_tokens_label, |this, label| {
-                                this.child(label).child(separator_dots())
-                            })
-                            .when_some(last_turn_clock, |this, label| {
-                                this.child(label).child(separator_dots())
-                            }),
+            .items_center()
+            .gap(px(8.))
+            .child(
+                h_flex()
+                    .opacity(0.4)
+                    .hover(|s| s.opacity(1.))
+                    .when(
+                        last_turn_tokens_label.is_some() || last_turn_clock.is_some(),
+                        |this| {
+                            this.child(
+                                h_flex()
+                                    .px_1()
+                                    .gap_1()
+                                    .when_some(last_turn_tokens_label, |this, label| {
+                                        this.child(label).child(separator_dots())
+                                    })
+                                    .when_some(last_turn_clock, |this, label| {
+                                        this.child(label).child(separator_dots())
+                                    }),
+                            )
+                        },
                     )
-                },
+                    .when_some(feedback_buttons, |this, buttons| this.child(buttons))
+                    .child(scroll_to_recent_user_prompt)
+                    .when_some(scroll_to_top, |this, button| this.child(button)),
             )
-            .when_some(feedback_buttons, |this, buttons| this.child(buttons))
             .when_some(copy_response_button, |this, button| this.child(button))
-            .child(scroll_to_recent_user_prompt)
-            .when_some(scroll_to_top, |this, button| this.child(button))
+            .when_some(retry_response_button, |this, button| this.child(button))
             .into_any_element()
     }
 
@@ -7436,9 +7539,9 @@ impl ThreadView {
                     .size(px(9.))
                     .rounded_full()
                     .bg(if confirmation {
-                        rgb(0xCDBA86)
+                        cx.theme().status().warning
                     } else {
-                        rgb(0xABC7B5)
+                        cx.theme().status().success
                     }),
             )
             .child(
@@ -7447,7 +7550,7 @@ impl ThreadView {
                     .min_w_0()
                     .text_size(px(12.))
                     .line_height(px(18.))
-                    .text_color(rgb(0xA8ACBD))
+                    .text_color(cx.theme().colors().text_muted)
                     .truncate()
                     .child(label),
             )
@@ -11205,10 +11308,10 @@ impl ThreadView {
             ThreadError::AuthenticationRequired(_)
             | ThreadError::AuthenticationFailed { .. }
             | ThreadError::NoCredentials { .. }
-            | ThreadError::StreamError { .. } => 0xD6B99B,
-            _ => 0xD3A7AD,
+            | ThreadError::StreamError { .. } => cx.theme().status().warning,
+            _ => cx.theme().status().error,
         };
-        Some(div().child(callout.conversation_card(rgb(title_color).into())))
+        Some(div().child(callout.conversation_card(title_color)))
     }
 
     fn render_refusal_error(&self, cx: &mut Context<'_, Self>) -> Callout {
@@ -11231,14 +11334,17 @@ impl ThreadView {
 
     fn render_authentication_required_error(
         &self,
-        error: SharedString,
+        _error: SharedString,
         cx: &mut Context<Self>,
     ) -> Callout {
         Callout::new()
             .severity(Severity::Error)
             .title("Reconnect your provider")
             .icon(IconName::XCircle)
-            .description(error.clone())
+            .description(format!(
+                "The connection to {} has expired. Reconnect to continue this conversation. Your message has been kept.",
+                self.agent_display_name
+            ))
             .actions_slot(
                 h_flex()
                     .gap(px(8.))
@@ -11246,8 +11352,7 @@ impl ThreadView {
                     .when(
                         self.model_selector.is_some() || self.config_options_view.is_some(),
                         |this| this.child(self.open_model_selector_button(cx)),
-                    )
-                    .child(self.create_copy_button(error)),
+                    ),
             )
             .dismiss_action(self.dismiss_error_button(cx))
     }
@@ -11388,7 +11493,7 @@ impl ThreadView {
     }
 
     fn open_model_selector_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::response_action_button("open-model-selector", "Choose another model", false).on_click(
+        Self::response_action_button("open-model-selector", "Choose another model", false, cx).on_click(
             cx.listener(|this, _, window, cx| {
                 this.clear_thread_error(cx);
                 window.dispatch_action(ToggleModelSelector.boxed_clone(), cx);
@@ -11415,33 +11520,39 @@ impl ThreadView {
     }
 
     fn retry_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::response_action_button("retry", "Retry", true).on_click(cx.listener(
+        Self::response_action_button("retry", "Retry", true, cx).on_click(cx.listener(
             |this, _, _, cx| {
                 this.retry_generation(cx);
             },
         ))
     }
 
-    fn response_action_button(id: &'static str, label: &'static str, primary: bool) -> ButtonLike {
+    fn response_action_button(
+        id: &'static str,
+        label: &'static str,
+        primary: bool,
+        cx: &App,
+    ) -> ButtonLike {
         ButtonLike::new(id)
             .aria_label(label)
             .size(ButtonSize::None)
             .height(px(30.).into())
             .corner_radius(px(6.))
-            .style(ButtonStyle::OutlinedCustom(
-                rgb(if primary { 0x655971 } else { 0x454957 }).into(),
-            ))
-            .background(if primary {
-                rgb(0x3A3346).into()
+            .style(if primary {
+                ButtonStyle::Tinted(TintColor::Accent)
             } else {
-                gpui::transparent_black()
+                ButtonStyle::Outlined
             })
             .child(
                 div()
                     .px(px(10.))
                     .text_size(px(12.))
                     .line_height(px(16.))
-                    .text_color(rgb(0xDED5E9))
+                    .text_color(if primary {
+                        cx.theme().colors().text_accent
+                    } else {
+                        cx.theme().colors().text
+                    })
                     .child(label),
             )
     }
@@ -11456,10 +11567,10 @@ impl ThreadView {
             .next()
             .is_some();
         Callout::new()
-            .conversation_card(rgb(0xB9ACCB).into())
+            .conversation_card(cx.theme().colors().text_accent)
             .title("Response stopped")
             .description(
-                "You stopped this response. Any file changes made so far are still available.",
+                "You stopped this response. File changes made so far are still available; checks have not finished.",
             )
             .when(can_resume || has_changes, |this| {
                 this.actions_slot(
@@ -11467,7 +11578,7 @@ impl ThreadView {
                         .gap(px(8.))
                         .when(can_resume, |this| {
                             this.child(
-                                Self::response_action_button("continue-response", "Continue", true)
+                                Self::response_action_button("continue-response", "Continue", true, cx)
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.retry_generation(cx)),
                                     ),
@@ -11479,6 +11590,7 @@ impl ThreadView {
                                     "review-stopped-changes",
                                     "Review changes",
                                     false,
+                                    cx,
                                 )
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(OpenAgentDiff.boxed_clone(), cx)
@@ -11512,7 +11624,7 @@ impl ThreadView {
     }
 
     fn authenticate_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::response_action_button("authenticate", "Reconnect", true).on_click(cx.listener({
+        Self::response_action_button("authenticate", "Reconnect", true, cx).on_click(cx.listener({
             move |this, _, window, cx| {
                 let server_view = this.server_view.clone();
 
@@ -11554,31 +11666,19 @@ impl ThreadView {
 
     fn render_any_thread_error(
         &mut self,
-        error: SharedString,
-        window: &mut Window,
+        _error: SharedString,
+        _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Callout {
         let can_resume = self.thread.read(cx).can_retry(cx);
-
-        let markdown = if let Some(markdown) = &self.thread_error_markdown {
-            markdown.clone()
-        } else {
-            let markdown = cx.new(|cx| Markdown::new(error.clone(), None, None, cx));
-            self.thread_error_markdown = Some(markdown.clone());
-            markdown
-        };
-
-        let markdown_style =
-            MarkdownStyle::themed(MarkdownFont::Agent, window, cx).with_muted_text(cx);
-        let description = self
-            .render_markdown(markdown, markdown_style, cx)
-            .into_any_element();
 
         Callout::new()
             .severity(Severity::Error)
             .icon(IconName::XCircle)
             .title("The response couldn’t finish")
-            .description_slot(description)
+            .description(
+                "The provider returned an error before any files were changed. Your message is saved—try again when you're ready.",
+            )
             .actions_slot(
                 h_flex()
                     .gap(px(8.))
@@ -11586,8 +11686,7 @@ impl ThreadView {
                     .when(
                         self.model_selector.is_some() || self.config_options_view.is_some(),
                         |this| this.child(self.open_model_selector_button(cx)),
-                    )
-                    .child(self.create_copy_button(error.to_string())),
+                    ),
             )
             .dismiss_action(self.dismiss_error_button(cx))
     }

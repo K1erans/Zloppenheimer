@@ -1,9 +1,11 @@
 use std::rc::Rc;
 
-use acp_thread::{AgentModelInfo, AgentModelSelector};
+use acp_thread::{AgentModelId, AgentModelInfo, AgentModelSelector};
+use agent_settings::AgentSettings;
 use gpui::{Entity, FocusHandle};
 use picker::popover_menu::PickerPopoverMenu;
-use ui::{PopoverMenuHandle, Tooltip, prelude::*};
+use settings::Settings as _;
+use ui::{ButtonLike, PopoverMenuHandle, Tooltip, prelude::*};
 
 use crate::ui::ModelSelectorTooltip;
 use crate::{ModelSelector, model_selector::acp_model_selector};
@@ -51,14 +53,27 @@ impl Render for ModelSelectorPopover {
             .as_ref()
             .map(|model| model.name.clone())
             .unwrap_or_else(|| SharedString::from("Select a Model"));
-
-        let (color, icon) = if self.menu_handle.is_deployed() {
-            (Color::Accent, IconName::ChevronUp)
+        let is_settings_default = match (
+            model.as_ref(),
+            AgentSettings::try_get(cx).and_then(|settings| settings.default_model.as_ref()),
+        ) {
+            (Some(model), Some(selection)) => {
+                model.id
+                    == AgentModelId::new(format!("{}/{}", selection.provider.0, selection.model))
+            }
+            _ => false,
+        };
+        let deployed = self.menu_handle.is_deployed();
+        let label = if deployed && is_settings_default {
+            SharedString::from("Default")
         } else {
-            (
-                Color::Custom(gpui::rgb(0xC4C3D1).into()),
-                IconName::ChevronDown,
-            )
+            model_name
+        };
+
+        let icon = if deployed {
+            IconName::ChevronUp
+        } else {
+            IconName::ChevronDown
         };
 
         let show_cycle_row = selector.delegate.favorites_count() > 1;
@@ -73,10 +88,26 @@ impl Render for ModelSelectorPopover {
 
         PickerPopoverMenu::new(
             self.selector.clone(),
-            Button::new("active-model", model_name)
-                .label_size(LabelSize::XSmall)
-                .color(color)
-                .end_icon(Icon::new(icon).color(Color::Muted).size(IconSize::XSmall)),
+            ButtonLike::new("active-model")
+                .size(ButtonSize::None)
+                .when(deployed, |this| {
+                    this.background(cx.theme().colors().element_hover)
+                        .corner_radius(px(4.))
+                })
+                .child(
+                    h_flex()
+                        .gap(px(7.))
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Icon::new(icon)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                ),
             tooltip,
             gpui::Anchor::BottomLeft,
             cx,

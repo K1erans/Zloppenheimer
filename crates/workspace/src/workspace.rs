@@ -49,7 +49,7 @@ use client::{
     proto::{self, ErrorCode, PanelId, PeerId},
 };
 use collections::{HashMap, HashSet, TypeIdHashMap, hash_map};
-use dock::{Dock, DockPosition, PanelButtons, PanelHandle, RESIZE_HANDLE_SIZE};
+use dock::{Dock, DockPosition, PanelHandle, RESIZE_HANDLE_SIZE};
 use fs::Fs;
 use futures::{
     Future, FutureExt, StreamExt,
@@ -2014,21 +2014,12 @@ impl Workspace {
         let left_dock = Dock::new(DockPosition::Left, modal_layer.clone(), window, cx);
         let bottom_dock = Dock::new(DockPosition::Bottom, modal_layer.clone(), window, cx);
         let right_dock = Dock::new(DockPosition::Right, modal_layer.clone(), window, cx);
-        let left_dock_buttons = cx.new(|cx| PanelButtons::new(left_dock.clone(), cx));
-        let bottom_dock_buttons = cx.new(|cx| PanelButtons::new(bottom_dock.clone(), cx));
-        let right_dock_buttons = cx.new(|cx| PanelButtons::new(right_dock.clone(), cx));
         let multi_workspace = window
             .root::<MultiWorkspace>()
             .flatten()
             .map(|mw| mw.downgrade());
-        let status_bar = cx.new(|cx| {
-            let mut status_bar =
-                StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx);
-            status_bar.add_left_item(left_dock_buttons, window, cx);
-            status_bar.add_right_item(right_dock_buttons, window, cx);
-            status_bar.add_right_item(bottom_dock_buttons, window, cx);
-            status_bar
-        });
+        let status_bar =
+            cx.new(|cx| StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx));
 
         let session_id = app_state.session.read(cx).id().to_owned();
 
@@ -2946,13 +2937,24 @@ impl Workspace {
         self.panels_hosted_in_sidebar && !panel.is_agent_panel(cx) && panel.enabled(cx)
     }
 
-    /// The panels the sidebar is responsible for rendering, in dock order.
+    /// The panels the sidebar is responsible for rendering, ordered by
+    /// activation priority so the rail order does not depend on which dock
+    /// each panel is configured to use.
     pub fn sidebar_hosted_panels(&self, cx: &App) -> Vec<Arc<dyn PanelHandle>> {
-        [&self.left_dock, &self.right_dock]
+        let mut panels = [&self.left_dock, &self.right_dock]
             .into_iter()
             .flat_map(|dock| dock.read(cx).panel_handles().cloned().collect::<Vec<_>>())
             .filter(|panel| self.is_panel_hosted_in_sidebar(panel.as_ref(), cx))
-            .collect()
+            .collect::<Vec<_>>();
+        panels.sort_by_key(|panel| panel.activation_priority(cx));
+        panels
+    }
+
+    /// On macOS the multi-workspace window draws the only title bar, so a
+    /// workspace inside it must not add a second one above its panes.
+    fn renders_titlebar_item(&self) -> bool {
+        self.titlebar_item.is_some()
+            && !(cfg!(target_os = "macos") && self.multi_workspace.is_some())
     }
 
     /// The sidebar-hosted panel that is currently revealed, if any. Derived from
@@ -9001,7 +9003,7 @@ impl Workspace {
         };
 
         let mut parts = Vec::new();
-        if self.titlebar_item.is_some() {
+        if self.renders_titlebar_item() {
             // The title bar is an ARIA toolbar, so region navigation lands on
             // its first control rather than the toolbar container.
             parts.push(FocusablePart::toolbar(self.titlebar_focus_handle.clone()));
@@ -9867,36 +9869,41 @@ impl Render for Workspace {
             // a tab group: region navigation lands on the first control (per
             // the ARIA toolbar pattern), Tab steps through them, and arrow keys
             // move between them once focus is inside.
-            .when_some(self.titlebar_item.clone(), |this, item| {
-                this.child(
-                    div()
-                        .id("titlebar-region")
-                        .track_focus(&self.titlebar_focus_handle)
-                        .tab_group()
-                        .role(gpui::Role::Toolbar)
-                        .aria_label("Title bar")
-                        .on_key_down(cx.listener(
-                            |workspace, event: &gpui::KeyDownEvent, window, cx| {
-                                if event.keystroke.modifiers.modified() {
-                                    return;
-                                }
-                                match event.keystroke.key.as_str() {
-                                    "right" => {
-                                        workspace.move_titlebar_item_focus(true, window, cx);
-                                        cx.stop_propagation();
+            .when_some(
+                self.titlebar_item
+                    .clone()
+                    .filter(|_| self.renders_titlebar_item()),
+                |this, item| {
+                    this.child(
+                        div()
+                            .id("titlebar-region")
+                            .track_focus(&self.titlebar_focus_handle)
+                            .tab_group()
+                            .role(gpui::Role::Toolbar)
+                            .aria_label("Title bar")
+                            .on_key_down(cx.listener(
+                                |workspace, event: &gpui::KeyDownEvent, window, cx| {
+                                    if event.keystroke.modifiers.modified() {
+                                        return;
                                     }
-                                    "left" => {
-                                        workspace.move_titlebar_item_focus(false, window, cx);
-                                        cx.stop_propagation();
+                                    match event.keystroke.key.as_str() {
+                                        "right" => {
+                                            workspace.move_titlebar_item_focus(true, window, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        "left" => {
+                                            workspace.move_titlebar_item_focus(false, window, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
-                                }
-                            },
-                        ))
-                        .w_full()
-                        .child(item),
-                )
-            })
+                                },
+                            ))
+                            .w_full()
+                            .child(item),
+                    )
+                },
+            )
             .on_modifiers_changed(move |_, _, cx| {
                 for &id in &notification_entities {
                     cx.notify(id);
@@ -10264,9 +10271,13 @@ impl Render for Workspace {
                             }))
                             .children(self.render_notifications(window, cx)),
                     )
-                    .when(self.status_bar_visible(cx), |parent| {
-                        parent.child(self.status_bar.clone())
-                    })
+                    .when(
+                        self.status_bar_visible(cx)
+                            && self.active_item(cx).is_some_and(|item| {
+                                item.buffer_kind(cx) == item::ItemBufferKind::Singleton
+                            }),
+                        |parent| parent.child(self.status_bar.clone()),
+                    )
                     .child(self.toast_layer.clone()),
             )
     }
@@ -20432,7 +20443,7 @@ mod tests {
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
         let welcome = cx.new_window_entity(|window, cx| {
-            crate::welcome::WelcomePage::new(workspace.downgrade(), true, window, cx)
+            crate::welcome::WelcomePage::new(workspace.downgrade(), true, false, window, cx)
         });
         cx.simulate_resize(gpui::size(px(400.), px(200.)));
         cx.draw(

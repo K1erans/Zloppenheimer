@@ -71,7 +71,7 @@ pub(crate) fn render_ai_page(
         .map(|model| model.name().0.clone())
         .unwrap_or_else(|| "Choose a model".into());
     let model_menu = PopoverMenu::new("default-model-menu")
-        .trigger(dropdown("default-model", model_label))
+        .trigger(dropdown("default-model", model_label, cx))
         .anchor(gpui::Anchor::TopRight)
         .menu({
             let models = models.clone();
@@ -116,7 +116,7 @@ pub(crate) fn render_ai_page(
         .map(|level| level.name.clone())
         .unwrap_or_else(|| "Model default".into());
     let effort_control = PopoverMenu::new("default-effort-menu")
-        .trigger(dropdown("default-effort", effort_label).disabled(effort_levels.is_empty()))
+        .trigger(dropdown("default-effort", effort_label, cx).disabled(effort_levels.is_empty()))
         .anchor(gpui::Anchor::TopRight)
         .menu(move |window, cx| {
             let effort_levels = effort_levels.clone();
@@ -200,13 +200,19 @@ pub(crate) fn render_ai_page(
                 })
                 .into_any_element(),
                 57.,
+                cx,
             )
             .into_any_element()
         })
         .collect::<Vec<_>>();
     let title = v_flex()
         .gap(px(9.))
-        .child(text(ui::localized("AI", cx), 26., 34., 0xECECF2))
+        .child(text(
+            ui::localized("AI", cx),
+            26.,
+            34.,
+            cx.theme().colors().text,
+        ))
         .child(text(
             ui::localized(
                 "Choose the models in your chat picker and set your defaults.",
@@ -214,14 +220,14 @@ pub(crate) fn render_ai_page(
             ),
             13.,
             20.,
-            0xA8ABBD,
+            cx.theme().colors().text_muted,
         ));
     v_flex()
         .id("ai-settings-page")
         .flex_1()
         .min_w_0()
         .size_full()
-        .bg(gpui::rgb(0x232530))
+        .bg(cx.theme().colors().background)
         .pt(px(36.))
         .pb(px(28.))
         .track_scroll(&state.scroll)
@@ -229,33 +235,40 @@ pub(crate) fn render_ai_page(
         .child(
             v_flex()
                 .w_full()
-                .max_w(px(948.))
+                .max_w(px(900.))
                 .mx_auto()
-                .px(px(24.))
                 .gap(px(16.))
                 .child(title)
-                .child(text(ui::localized("Defaults", cx), 14., 20., 0xCDCBDA))
+                .child(text(
+                    ui::localized("Defaults", cx),
+                    14.,
+                    20.,
+                    cx.theme().colors().text,
+                ))
                 .child(
-                    card()
+                    card(cx)
                         .child(row(
                             ui::localized("Default model", cx),
                             ui::localized("Used when you choose Default in the chat composer.", cx),
                             model_menu.into_any_element(),
                             65.,
+                            cx,
                         ))
                         .child(row(
                             ui::localized("Reasoning", cx),
                             ui::localized("Starting effort for new conversations.", cx),
                             effort_control.into_any_element(),
                             65.,
+                            cx,
                         ))
                         .child(row(
                             ui::localized("Context window", cx),
                             ui::localized("Starting context size when supported by the model.", cx),
-                            dropdown("default-context", context_label)
+                            dropdown("default-context", context_label, cx)
                                 .disabled(true)
                                 .into_any_element(),
                             65.,
+                            cx,
                         )),
                 )
                 .child(
@@ -265,23 +278,28 @@ pub(crate) fn render_ai_page(
                             ui::localized("Models in your picker", cx),
                             14.,
                             20.,
-                            0xCDCBDA,
+                            cx.theme().colors().text,
                         ))
-                        .child(text(format!("{enabled} enabled"), 11., 14., 0xA1A4B8)),
+                        .child(text(
+                            format!("{enabled} enabled"),
+                            11.,
+                            14.,
+                            cx.theme().colors().text_muted,
+                        )),
                 )
                 .child(
-                    card()
+                    card(cx)
                         .child(
                             h_flex()
                                 .px(px(16.))
                                 .py(px(12.))
                                 .gap(px(10.))
                                 .border_b_1()
-                                .border_color(gpui::rgb(0x393C49))
+                                .border_color(cx.theme().colors().border)
                                 .child(
                                     Icon::new(IconName::MagnifyingGlass)
                                         .size(IconSize::Custom(rems_from_px(16_f32)))
-                                        .color(Color::Custom(gpui::rgb(0xB7B8C7).into())),
+                                        .color(Color::Muted),
                                 )
                                 .child(state.search.clone()),
                         )
@@ -297,7 +315,7 @@ pub(crate) fn render_ai_page(
                                 ui::localized("Connect a provider to see available models.", cx),
                                 12.,
                                 18.,
-                                0xA1A4B8,
+                                cx.theme().colors().text_muted,
                             )))
                         }),
                 )
@@ -306,9 +324,9 @@ pub(crate) fn render_ai_page(
                         .h(px(56.))
                         .px(px(16.))
                         .border_1()
-                        .border_color(gpui::rgb(0x414453))
+                        .border_color(cx.theme().colors().border)
                         .rounded(px(9.))
-                        .bg(gpui::rgb(0x282B37))
+                        .bg(cx.theme().colors().surface_background)
                         .child(
                             v_flex()
                                 .flex_1()
@@ -317,7 +335,7 @@ pub(crate) fn render_ai_page(
                                     ui::localized("Model connections", cx),
                                     13.,
                                     16.,
-                                    0xE0DEEA,
+                                    cx.theme().colors().text,
                                 ))
                                 .child(text(
                                     ui::localized(
@@ -326,19 +344,19 @@ pub(crate) fn render_ai_page(
                                     ),
                                     11.,
                                     14.,
-                                    0xA1A4B8,
+                                    cx.theme().colors().text_muted,
                                 )),
                         )
                         .child(
                             ButtonLike::new("connect-model")
                                 .height((px(32.)).into())
                                 .corner_radius(px(6.))
-                                .background((gpui::rgb(0x3A3346)).into())
+                                .background((cx.theme().colors().element_hover).into())
                                 .child(text(
                                     ui::localized("＋ Connect model", cx),
                                     12.,
                                     16.,
-                                    0xE0D4EF,
+                                    cx.theme().colors().text_accent,
                                 ))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.push_dynamic_sub_page(
@@ -351,27 +369,13 @@ pub(crate) fn render_ai_page(
                                         cx,
                                     );
                                 }))
-                                .custom_style(|this| {
-                                    this.px(px(11.))
-                                        .border_1()
-                                        .border_color(gpui::rgb(0x655971))
+                                .custom_style({
+                                    let border_selected = cx.theme().colors().border_selected;
+                                    move |this| {
+                                        this.px(px(11.)).border_1().border_color(border_selected)
+                                    }
                                 }),
                         ),
-                )
-                .child(
-                    ButtonLike::new("advanced-ai-settings")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(state) = this.ai_page_state.as_mut() {
-                                state.advanced = true;
-                            }
-                            cx.notify();
-                        }))
-                        .child(text(
-                            ui::localized("Advanced AI settings", cx),
-                            12.,
-                            16.,
-                            0xACA2BC,
-                        )),
                 ),
         )
         .into_any_element()
@@ -395,20 +399,25 @@ fn model_selection(model: &dyn LanguageModel) -> LanguageModelSelection {
     }
 }
 
-pub(super) fn text(value: impl Into<SharedString>, size: f32, line_height: f32, color: u32) -> Div {
+pub(super) fn text(
+    value: impl Into<SharedString>,
+    size: f32,
+    line_height: f32,
+    color: impl Into<gpui::Hsla>,
+) -> Div {
     div()
         .text_size(px(size))
         .line_height(px(line_height))
-        .text_color(gpui::rgb(color))
+        .text_color(color.into())
         .child(value.into())
 }
 
-pub(super) fn card() -> Div {
+pub(super) fn card(cx: &App) -> Div {
     v_flex()
         .w_full()
-        .bg(gpui::rgb(0x282B37))
+        .bg(cx.theme().colors().surface_background)
         .border_1()
-        .border_color(gpui::rgb(0x3C3F4C))
+        .border_color(cx.theme().colors().border)
         .rounded(px(10.))
         .overflow_hidden()
 }
@@ -418,42 +427,40 @@ fn row(
     description: impl Into<SharedString>,
     control: AnyElement,
     height: f32,
+    cx: &App,
 ) -> Div {
     h_flex()
         .w_full()
         .min_h(px(height))
         .px(px(16.))
-        .py(px(8.))
+        .py(px(12.))
         .gap(px(22.))
         .border_b_1()
-        .border_color(gpui::rgb(0x393C49))
+        .border_color(cx.theme().colors().border)
         .child(
             v_flex()
                 .flex_1()
                 .gap(px(5.))
-                .child(text(title, 13., 16., 0xDFDDE9))
-                .child(text(description, 11., 17., 0xA1A4B8)),
+                .child(text(title, 13., 16., cx.theme().colors().text))
+                .child(text(description, 11., 17., cx.theme().colors().text_muted)),
         )
         .child(control)
 }
 
-fn dropdown(id: &'static str, label: SharedString) -> ButtonLike {
+fn dropdown(id: &'static str, label: SharedString, cx: &App) -> ButtonLike {
+    let border = cx.theme().colors().border;
     ButtonLike::new(id)
         .height((px(32.)).into())
         .corner_radius(px(6.))
         .child(
             h_flex()
                 .gap(px(12.))
-                .child(text(label, 12., 16., 0xDCD6E7))
+                .child(text(label, 12., 16., cx.theme().colors().text))
                 .child(
                     Icon::new(IconName::ChevronDown)
                         .size(IconSize::Custom(rems_from_px(13_f32)))
-                        .color(Color::Custom(gpui::rgb(0xB7B8C7).into())),
+                        .color(Color::Muted),
                 ),
         )
-        .custom_style(|this| {
-            this.px(px(10.))
-                .border_1()
-                .border_color(gpui::rgb(0x4B475B))
-        })
+        .custom_style(move |this| this.px(px(10.)).border_1().border_color(border))
 }

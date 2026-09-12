@@ -154,23 +154,31 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
                 .gap(px(10.))
                 .flex_none()
                 .border_b_1()
-                .border_color(gpui::rgb(0x424452))
+                .border_color(cx.theme().colors().border)
                 .child(
                     Icon::new(IconName::MagnifyingGlass)
                         .size(IconSize::Custom(rems(17. / 16.)))
-                        .color(Color::Custom(gpui::rgb(0xB7B8C7).into())),
+                        .color(Color::Muted),
                 )
-                .child(div().flex_1().min_w_0().child(editor.render(window, cx)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(14.))
+                        .line_height(px(18.))
+                        .text_color(cx.theme().colors().text_muted)
+                        .child(editor.render(window, cx)),
+                )
                 .child(
                     div()
                         .border_1()
-                        .border_color(gpui::rgb(0x4A4C5D))
+                        .border_color(cx.theme().colors().border)
                         .rounded(px(4.))
                         .px(px(4.))
                         .py(px(2.))
                         .text_size(px(10.))
                         .line_height(px(12.))
-                        .text_color(gpui::rgb(0xB7B9CC))
+                        .text_color(cx.theme().colors().text_muted)
                         .child("Esc"),
                 ),
         )
@@ -434,18 +442,18 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
                             .px(px(14.))
                             .text_size(px(11.))
                             .line_height(px(16.))
-                            .text_color(gpui::rgb(0xAEB2C9))
+                            .text_color(cx.theme().colors().text_muted)
                             .child(ui::localized(heading, cx)),
                     )
                 })
                 .child(
-                    div().px(px(7.)).child(
+                    div().px(px(if in_this_window { 8. } else { 0. })).child(
                         ListItem::new(ix)
                             .height(px(if in_this_window { 38. } else { 36. }))
-                            .horizontal_padding(px(10.))
+                            .horizontal_padding(px(if in_this_window { 10. } else { 18. }))
                             .corner_radius(px(6.))
                             .toggle_state(selected)
-                            .selected_background(gpui::rgb(0x444052).into())
+                            .selected_background(cx.theme().colors().element_active)
                             .spacing(ListItemSpacing::Dense)
                             .child(
                                 h_flex()
@@ -455,14 +463,11 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
                                     .child(
                                         Icon::new(icon)
                                             .size(IconSize::Custom(rems(17. / 16.)))
-                                            .color(Color::Custom(
-                                                gpui::rgb(if selected {
-                                                    0xCEC6DF
-                                                } else {
-                                                    0xB7B8C7
-                                                })
-                                                .into(),
-                                            )),
+                                            .color(if selected {
+                                                Color::Accent
+                                            } else {
+                                                Color::Muted
+                                            }),
                                     )
                                     .child(
                                         div()
@@ -470,11 +475,7 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
                                             .min_w_0()
                                             .text_size(px(if in_this_window { 14. } else { 13. }))
                                             .line_height(px(if in_this_window { 18. } else { 16. }))
-                                            .text_color(gpui::rgb(if selected {
-                                                0xEEE8F5
-                                            } else {
-                                                0xD7DAE9
-                                            }))
+                                            .text_color(cx.theme().colors().text)
                                             .text_ellipsis()
                                             .child(name),
                                     )
@@ -483,7 +484,7 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
                                             div()
                                                 .text_size(px(14.))
                                                 .line_height(px(18.))
-                                                .text_color(gpui::rgb(0xC9ABDF))
+                                                .text_color(cx.theme().colors().text_accent)
                                                 .child("✓"),
                                         )
                                     }),
@@ -530,7 +531,7 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
             v_flex()
                 .pb(px(8.))
                 .border_t_1()
-                .border_color(gpui::rgb(0x424452))
+                .border_color(cx.theme().colors().border)
                 .child(
                     div()
                         .pt(px(14.))
@@ -538,7 +539,7 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
                         .px(px(14.))
                         .text_size(px(11.))
                         .line_height(px(16.))
-                        .text_color(gpui::rgb(0xAEB2C9))
+                        .text_color(cx.theme().colors().text_muted)
                         .child(ui::localized("ADD PROJECT", cx)),
                 )
                 .children(actions.map(|(id, label, description, icon, action_name)| {
@@ -550,32 +551,29 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
                         .child(
                             h_flex()
                                 .w_full()
-                                .px(px(15.))
+                                .px(px(16.))
                                 .gap(px(12.))
-                                .child(
-                                    h_flex().w(px(22.)).flex_none().justify_center().child(
-                                        Icon::new(icon)
-                                            .size(IconSize::Medium)
-                                            .color(Color::Custom(gpui::rgb(0xC6BCD7).into())),
-                                    ),
-                                )
+                                .child(h_flex().w(px(22.)).flex_none().justify_center().child(
+                                    Icon::new(icon).size(IconSize::Medium).color(Color::Accent),
+                                ))
                                 .child(
                                     v_flex()
                                         .flex_1()
                                         .min_w_0()
                                         .gap(px(4.))
+                                        .text_left()
                                         .child(
                                             div()
                                                 .text_size(px(14.))
                                                 .line_height(px(20.))
-                                                .text_color(gpui::rgb(0xE1DEED))
+                                                .text_color(cx.theme().colors().text)
                                                 .child(ui::localized(label, cx)),
                                         )
                                         .child(
                                             div()
                                                 .text_size(px(11.))
                                                 .line_height(px(17.))
-                                                .text_color(gpui::rgb(0xB4B7CC))
+                                                .text_color(cx.theme().colors().text_muted)
                                                 .child(ui::localized(description, cx)),
                                         ),
                                 )
@@ -583,7 +581,7 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
                                     div()
                                         .text_size(px(15.))
                                         .line_height(px(18.))
-                                        .text_color(gpui::rgb(0xAEB0C6))
+                                        .text_color(cx.theme().colors().text_muted)
                                         .child("›"),
                                 ),
                         )

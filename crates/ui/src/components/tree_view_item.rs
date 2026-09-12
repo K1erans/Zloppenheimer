@@ -23,6 +23,7 @@ pub struct TreeViewItem {
     on_secondary_mouse_down: Option<Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>>,
     tab_index: Option<isize>,
     focus_handle: Option<gpui::FocusHandle>,
+    end_slot: Option<AnyElement>,
 }
 
 impl TreeViewItem {
@@ -45,7 +46,13 @@ impl TreeViewItem {
             on_secondary_mouse_down: None,
             tab_index: None,
             focus_handle: None,
+            end_slot: None,
         }
+    }
+
+    pub fn end_slot(mut self, end_slot: impl IntoElement) -> Self {
+        self.end_slot = Some(end_slot.into_any_element());
+        self
     }
 
     pub fn group_name(mut self, group_name: impl Into<SharedString>) -> Self {
@@ -139,10 +146,8 @@ impl Toggleable for TreeViewItem {
 
 impl RenderOnce for TreeViewItem {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let selected_bg = cx.theme().colors().element_active.opacity(0.5);
-
+        let selected_bg = cx.theme().colors().element_active;
         let transparent_border = cx.theme().colors().border.opacity(0.);
-        let selected_border = cx.theme().colors().border.opacity(0.4);
         let focused_border = cx.theme().colors().border_focused;
 
         let item_size = rems_from_px(28_f32);
@@ -191,7 +196,7 @@ impl RenderOnce for TreeViewItem {
                     .border_color(transparent_border)
                     .focus_visible(|s| s.border_color(focused_border))
                     .when(self.selected, |this| {
-                        this.border_color(selected_border).bg(selected_bg)
+                        this.border_color(transparent_border).bg(selected_bg)
                     })
                     .hover(|s| s.bg(cx.theme().colors().element_hover))
                     .when(self.navigation_style, |this| {
@@ -199,8 +204,7 @@ impl RenderOnce for TreeViewItem {
                             .px(px(11.))
                             .rounded(px(6.))
                             .when(self.selected, |this| {
-                                this.bg(gpui::rgb(0x373342))
-                                    .border_color(transparent_border)
+                                this.bg(selected_bg).border_color(transparent_border)
                             })
                     })
                     .map(|this| {
@@ -208,18 +212,26 @@ impl RenderOnce for TreeViewItem {
 
                         if self.navigation_style {
                             return this.child(
-                                div()
+                                h_flex()
+                                    .w_full()
                                     .min_w_0()
-                                    .truncate()
-                                    .when(!self.root_item, |this| this.pl(px(22.)))
-                                    .text_size(px(14.))
-                                    .line_height(px(20.))
-                                    .text_color(gpui::rgb(if self.selected {
-                                        0xE2D8EE
-                                    } else {
-                                        0xBFC1D1
-                                    }))
-                                    .child(label),
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .when(!self.root_item, |this| this.pl(px(22.)))
+                                            .text_size(px(14.))
+                                            .line_height(px(20.))
+                                            .text_color(if self.selected {
+                                                cx.theme().colors().text_accent
+                                            } else {
+                                                cx.theme().colors().text_muted
+                                            })
+                                            .child(label),
+                                    )
+                                    .children(self.end_slot),
                             );
                         }
 

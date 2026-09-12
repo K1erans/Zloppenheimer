@@ -473,8 +473,8 @@ impl RenderOnce for DiffStyleControls {
                 .gap(px(2.))
                 .rounded(px(6.))
                 .border_1()
-                .border_color(gpui::rgb(0x4B4E5D))
-                .bg(gpui::rgb(0x20232D))
+                .border_color(cx.theme().colors().border)
+                .bg(cx.theme().colors().title_bar_background)
                 .children(
                     [
                         (DiffViewStyle::Unified, IconName::DiffUnified, "Unified"),
@@ -488,9 +488,9 @@ impl RenderOnce for DiffStyleControls {
                             .size(ButtonSize::None)
                             .height(px(22.).into())
                             .corner_radius(px(4.))
-                            .custom_style(|this| this.px(px(7.)).gap(px(5.)))
+                            .custom_style(|this| this.px(px(8.)).gap(px(5.)))
                             .background(if selected {
-                                gpui::rgb(0x494052).into()
+                                cx.theme().colors().element_hover
                             } else {
                                 gpui::transparent_black()
                             })
@@ -498,20 +498,21 @@ impl RenderOnce for DiffStyleControls {
                             .child(
                                 Icon::new(icon)
                                     .size(IconSize::Custom(rems(14. / 16.)))
-                                    .color(Color::Custom(
-                                        gpui::rgb(if selected { 0xE0D0ED } else { 0xABB2C6 })
-                                            .into(),
-                                    )),
+                                    .color(if selected {
+                                        Color::Accent
+                                    } else {
+                                        Color::Muted
+                                    }),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.))
                                     .line_height(px(16.))
-                                    .text_color(gpui::rgb(if selected {
-                                        0xEADFF2
+                                    .text_color(if selected {
+                                        cx.theme().colors().text_accent
                                     } else {
-                                        0xB5BBCD
-                                    }))
+                                        cx.theme().colors().text_muted
+                                    })
                                     .child(label),
                             )
                             .tooltip(Tooltip::text(

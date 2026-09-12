@@ -28,6 +28,7 @@ const DEFAULT_AUDIO_OUTPUT: AudioOutputDeviceName = AudioOutputDeviceName(None);
 const DEFAULT_EMPTY_AUDIO_OUTPUT: Option<&AudioOutputDeviceName> = Some(&DEFAULT_AUDIO_OUTPUT);
 const DEFAULT_AUDIO_INPUT: AudioInputDeviceName = AudioInputDeviceName(None);
 const DEFAULT_EMPTY_AUDIO_INPUT: Option<&AudioInputDeviceName> = Some(&DEFAULT_AUDIO_INPUT);
+const DEFAULT_MODEL_SPEED: language_model::Speed = language_model::Speed::Standard;
 
 macro_rules! concat_sections {
     (@vec, $($arr:expr),+ $(,)?) => {{
@@ -208,7 +209,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Default file open destination",
-                description: "Choose where file links from conversations open.",
+                description: "Where files and folders open by default.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("default_file_open_destination"),
@@ -227,7 +228,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Language",
-                description: "Choose the language used in the app.",
+                description: "Language used throughout the app.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("app_language"),
@@ -305,18 +306,19 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Speed",
-                description: "Use faster responses when supported by the selected model.",
+                description: "How quickly agents run across chats and background tasks.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("agent.default_model.speed"),
                     pick: |settings_content| {
-                        settings_content
-                            .agent
-                            .as_ref()?
-                            .default_model
-                            .as_ref()?
-                            .speed
-                            .as_ref()
+                        Some(
+                            settings_content
+                                .agent
+                                .as_ref()
+                                .and_then(|agent| agent.default_model.as_ref())
+                                .and_then(|model| model.speed.as_ref())
+                                .unwrap_or(&DEFAULT_MODEL_SPEED),
+                        )
                     },
                     write: |settings_content, value, cx| {
                         let mut selection = settings_content

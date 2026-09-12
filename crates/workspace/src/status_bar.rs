@@ -148,9 +148,13 @@ impl Render for StatusBar {
                 }),
             )
             .w_full()
+            .h(px(30.))
+            .flex_none()
             .justify_between()
-            .gap(DynamicSpacing::Base08.rems(cx))
-            .p(DynamicSpacing::Base04.rems(cx))
+            .gap(px(16.))
+            .px(px(16.))
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().status_bar_background)
             .map(|el| match window.window_decorations() {
                 Decorations::Server => el,
@@ -193,7 +197,7 @@ impl StatusBar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         h_flex()
-            .gap_1()
+            .gap(px(16.))
             .min_w_0()
             .overflow_x_hidden()
             .when(
@@ -212,7 +216,7 @@ impl StatusBar {
     ) -> impl IntoElement {
         h_flex()
             .flex_shrink_0()
-            .gap_1()
+            .gap(px(16.))
             .overflow_x_hidden()
             .children(
                 self.right_items

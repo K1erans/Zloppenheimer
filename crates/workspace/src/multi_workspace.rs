@@ -4,7 +4,7 @@ use fs::Fs;
 use gpui::{
     AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
     ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity, Window,
-    WindowId, actions, deferred, px,
+    WindowControlArea, WindowId, actions, deferred, px,
 };
 pub use project::ProjectGroupKey;
 use project::{DisableAiSettings, Project};
@@ -316,6 +316,7 @@ pub struct MultiWorkspace {
     sidebar: Option<Box<dyn SidebarHandle>>,
     sidebar_open: bool,
     sidebar_overlay: Option<AnyView>,
+    app_overlay: Option<AnyView>,
     pending_removal_tasks: Vec<Task<()>>,
     _serialize_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -393,6 +394,7 @@ impl MultiWorkspace {
             sidebar: None,
             sidebar_open,
             sidebar_overlay: None,
+            app_overlay: None,
             pending_removal_tasks: Vec::new(),
             _serialize_task: None,
             _subscriptions: vec![release_subscription, settings_subscription],
@@ -435,6 +437,15 @@ impl MultiWorkspace {
 
     pub fn set_sidebar_overlay(&mut self, overlay: Option<AnyView>, cx: &mut Context<Self>) {
         self.sidebar_overlay = overlay;
+        cx.notify();
+    }
+
+    pub fn app_overlay(&self) -> Option<AnyView> {
+        self.app_overlay.clone()
+    }
+
+    pub fn set_app_overlay(&mut self, overlay: Option<AnyView>, cx: &mut Context<Self>) {
+        self.app_overlay = overlay;
         cx.notify();
     }
 
@@ -2128,6 +2139,11 @@ impl Render for MultiWorkspace {
 
         let ui_font = theme_settings::setup_ui_font(window, cx);
         let text_color = cx.theme().colors().text;
+        let title_bar_height = ui::utils::platform_title_bar_height(window);
+        let app_overlay = self.app_overlay.clone();
+        let showing_app_overlay = app_overlay.is_some();
+        let show_sidebar_open_button =
+            !showing_app_overlay && self.multi_workspace_enabled(cx) && !self.sidebar_open();
 
         let workspace = self.workspace().clone();
         let workspace_key_context = workspace.update(cx, |workspace, cx| workspace.key_context(cx));
@@ -2230,43 +2246,214 @@ impl Render for MultiWorkspace {
                         ))
                     },
                 )
-                .children(left_sidebar)
-                .child(
-                    div()
-                        .flex()
-                        .flex_1()
-                        .size_full()
-                        .overflow_hidden()
-                        .child(self.workspace().clone()),
-                )
-                .children(right_sidebar)
+                .when_some(app_overlay, |this, overlay| {
+                    this.child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .size_full()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .pt(title_bar_height)
+                            .bg(cx.theme().colors().background)
+                            .child(overlay),
+                    )
+                })
+                .when(!showing_app_overlay, |this| {
+                    this.child(
+                        h_flex()
+                            .flex_1()
+                            .h_full()
+                            .min_h_0()
+                            .items_stretch()
+                            .overflow_hidden()
+                            .pt(title_bar_height)
+                            .children(left_sidebar)
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_1()
+                                    .size_full()
+                                    .overflow_hidden()
+                                    .child(workspace.clone()),
+                            )
+                            .children(right_sidebar),
+                    )
+                })
                 .child(
                     h_flex()
+                        .id("paper-title-bar")
                         .absolute()
                         .top_0()
                         .left_0()
                         .w_full()
-                        .h(ui::utils::platform_title_bar_height(window))
-                        .justify_center()
-                        .text_size(px(12.))
-                        .line_height(px(18.))
-                        .text_color(cx.theme().colors().text_muted)
-                        .child("Zloppenheimer"),
-                )
-                .child(self.workspace().read(cx).modal_layer.clone())
-                .children(self.sidebar_overlay.as_ref().map(|view| {
-                    deferred(div().absolute().size_full().inset_0().occlude().child(
-                        v_flex().h(px(0.0)).top_20().items_center().child(
-                            h_flex().occlude().child(view.clone()).on_mouse_down(
-                                MouseButton::Left,
-                                |_, _, cx| {
-                                    cx.stop_propagation();
-                                },
-                            ),
+                        .h(title_bar_height)
+                        .items_center()
+                        .px(px(16.))
+                        .bg(cx.theme().colors().title_bar_background)
+                        .window_control_area(WindowControlArea::Drag)
+                        .on_click(|event, window, _cx| {
+                            if event.click_count() == 2 {
+                                window.titlebar_double_click();
+                            }
+                        })
+                        .on_mouse_move(|event, window, _cx| {
+                            if event.dragging() {
+                                window.start_window_move();
+                            }
+                        })
+                        .when(show_sidebar_open_button && !sidebar_on_right, |this| {
+                            let left = if cfg!(target_os = "macos") {
+                                px(ui::utils::TRAFFIC_LIGHT_PADDING)
+                            } else {
+                                px(16.)
+                            };
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .left(left)
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .child(
+                                        ui::IconButton::new(
+                                            "title-bar-open-sidebar",
+                                            ui::IconName::ThreadsSidebarLeftClosed,
+                                        )
+                                        .icon_size(ui::IconSize::Small)
+                                        .icon_color(ui::Color::Muted)
+                                        .tooltip(|_, cx| {
+                                            ui::Tooltip::for_action(
+                                                "Open Threads Sidebar",
+                                                &ToggleWorkspaceSidebar,
+                                                cx,
+                                            )
+                                        })
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.toggle_sidebar(window, cx);
+                                            }),
+                                        ),
+                                    ),
+                            )
+                        })
+                        .when(!showing_app_overlay, |this| {
+                            let title_bar_button = |id: &'static str, icon: ui::IconName| {
+                                ui::IconButton::new(id, icon)
+                                    .width(px(28.))
+                                    .height(px(28.).into())
+                                    .corner_radius(px(6.))
+                                    .icon_size(ui::IconSize::Custom(ui::rems_from_px(16_f32)))
+                                    .icon_color(ui::Color::Muted)
+                            };
+                            this.child(
+                                h_flex()
+                                    .absolute()
+                                    .top_0()
+                                    .right(px(12.))
+                                    .h_full()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .when(
+                                        crate::WorkspaceSettings::get_global(cx)
+                                            .show_bottom_panel_button,
+                                        |this| {
+                                            this.child(
+                                                title_bar_button(
+                                                    "title-bar-toggle-terminal",
+                                                    ui::IconName::Terminal,
+                                                )
+                                                .tooltip(ui::Tooltip::text("Toggle Terminal"))
+                                                .on_click(|_, window, cx| {
+                                                    match cx.build_action(
+                                                        "terminal_panel::Toggle",
+                                                        None,
+                                                    ) {
+                                                        Ok(action) => {
+                                                            window.dispatch_action(action, cx)
+                                                        }
+                                                        Err(error) => log::error!(
+                                                            "Failed to toggle terminal: {error}"
+                                                        ),
+                                                    }
+                                                }),
+                                            )
+                                        },
+                                    )
+                                    .child(
+                                        title_bar_button(
+                                            "title-bar-toggle-right-dock",
+                                            ui::IconName::ThreadsSidebarRightOpen,
+                                        )
+                                        .tooltip(|_, cx| {
+                                            ui::Tooltip::for_action(
+                                                "Toggle Right Dock",
+                                                &crate::ToggleRightDock,
+                                                cx,
+                                            )
+                                        })
+                                        .on_click(
+                                            |_, window, cx| {
+                                                window.dispatch_action(
+                                                    Box::new(crate::ToggleRightDock),
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                    )
+                                    .when(show_sidebar_open_button && sidebar_on_right, |this| {
+                                        this.child(
+                                            title_bar_button(
+                                                "title-bar-open-sidebar",
+                                                ui::IconName::ThreadsSidebarRightClosed,
+                                            )
+                                            .tooltip(|_, cx| {
+                                                ui::Tooltip::for_action(
+                                                    "Open Threads Sidebar",
+                                                    &ToggleWorkspaceSidebar,
+                                                    cx,
+                                                )
+                                            })
+                                            .on_click(
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.toggle_sidebar(window, cx);
+                                                }),
+                                            ),
+                                        )
+                                    }),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .justify_center()
+                                .pr(px(46.))
+                                .text_size(px(12.))
+                                .line_height(px(18.))
+                                .text_color(cx.theme().colors().text_muted)
+                                .child("Zloppenheimer"),
                         ),
-                    ))
-                    .with_priority(2)
-                })),
+                )
+                .when(!showing_app_overlay, |this| {
+                    this.child(workspace.read(cx).modal_layer.clone()).children(
+                        self.sidebar_overlay.as_ref().map(|view| {
+                            deferred(div().absolute().size_full().inset_0().occlude().child(
+                                v_flex().h(px(0.0)).top_20().items_center().child(
+                                    h_flex().occlude().child(view.clone()).on_mouse_down(
+                                        MouseButton::Left,
+                                        |_, _, cx| {
+                                            cx.stop_propagation();
+                                        },
+                                    ),
+                                ),
+                            ))
+                            .with_priority(2)
+                        }),
+                    )
+                }),
             window,
             cx,
         )

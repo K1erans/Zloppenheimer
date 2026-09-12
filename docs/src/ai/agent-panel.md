@@ -108,7 +108,7 @@ You can also hold `cmd`/`ctrl` when submitting a message to automatically follow
 While an agent thread is running, Zed asks the operating system not to idle-sleep, so long-running turns are not interrupted when you step away.
 The display can still turn off and the screen can still lock; only system sleep is held back, and only while a thread is generating, not while it waits for your confirmation.
 
-Turn this off with the `agent.prevent_idle_sleep` setting.
+Turn this on with the `agent.prevent_idle_sleep` setting.
 If the operating system rejects the request, Zed logs the reason and continues without it.
 
 ### Get Notified {#get-notified}

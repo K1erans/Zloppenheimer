@@ -2846,7 +2846,7 @@ impl EditorElement {
         }
 
         if self.review_gutter {
-            return self.layout_review_line_numbers(gutter, window);
+            return self.layout_review_line_numbers(gutter, window, cx);
         }
 
         let relative = self.editor.read(cx).relative_line_numbers(cx);
@@ -2955,6 +2955,7 @@ impl EditorElement {
         &self,
         gutter: &Gutter<'_>,
         window: &mut Window,
+        cx: &App,
     ) -> Arc<HashMap<MultiBufferRow, LineNumberLayout>> {
         let mut line_numbers: HashMap<MultiBufferRow, LineNumberLayout> = HashMap::default();
         let snapshot = gutter.snapshot.buffer_snapshot();
@@ -2975,12 +2976,7 @@ impl EditorElement {
                 .diff_status
                 .is_some_and(|status| !status.is_deleted());
             let mut cells = SmallVec::<[(String, Pixels, bool, Hsla); 3]>::new();
-            let number_color = gpui::rgb(if self.split_side.is_some() {
-                0x9AA4B8
-            } else {
-                0xA0AABD
-            })
-            .into();
+            let number_color = cx.theme().colors().editor_line_number;
             if self.split_side.is_some() {
                 cells.push(((buffer_row + 1).to_string(), px(42.), false, number_color));
                 if deleted || added {
@@ -2989,7 +2985,11 @@ impl EditorElement {
                         if left { "−" } else { "+" }.to_owned(),
                         px(56.),
                         true,
-                        gpui::rgb(if left { 0xE3BBC1 } else { 0xBDE0C9 }).into(),
+                        if left {
+                            cx.theme().colors().version_control_deleted
+                        } else {
+                            cx.theme().colors().version_control_added
+                        },
                     ));
                 }
             } else {
@@ -3018,7 +3018,11 @@ impl EditorElement {
                         if deleted { "−" } else { "+" }.to_owned(),
                         px(126.),
                         true,
-                        gpui::rgb(if deleted { 0xE3BBC1 } else { 0xBDE0C9 }).into(),
+                        if deleted {
+                            cx.theme().colors().version_control_deleted
+                        } else {
+                            cx.theme().colors().version_control_added
+                        },
                     ));
                 }
             }
@@ -3508,20 +3512,28 @@ impl EditorElement {
                 result.into_any_element()
             }
 
-            Block::ExcerptBoundary { .. } => {
-                let color = cx.theme().colors().clone();
+            Block::ExcerptBoundary { excerpt, .. } => {
                 let mut result = v_flex().id(block_id).w_full();
 
-                result = result.child(
-                    h_flex().relative().child(
-                        div()
-                            .top(line_height / 2.)
-                            .absolute()
-                            .w_full()
-                            .h_px()
-                            .bg(color.border_variant),
-                    ),
-                );
+                if let Some(caption) = crate::git::render_excerpt_hunk_caption(
+                    excerpt,
+                    snapshot,
+                    self.split_side.is_none(),
+                    cx,
+                ) {
+                    result = result.child(caption);
+                } else {
+                    result = result.child(
+                        h_flex().relative().child(
+                            div()
+                                .top(line_height / 2.)
+                                .absolute()
+                                .w_full()
+                                .h_px()
+                                .bg(cx.theme().colors().border_variant),
+                        ),
+                    );
+                }
 
                 result.into_any()
             }
@@ -7041,7 +7053,7 @@ pub fn render_breadcrumb_text(
 
     let highlighted_segments = segments.into_iter().enumerate().map(|(index, segment)| {
         let mut text_style = window.text_style();
-        if let Some(font) = &breadcrumb_font {
+        if let Some(font) = breadcrumb_font.as_ref().filter(|_| multibuffer_header) {
             text_style.font_family = font.family.clone();
             text_style.font_features = font.features.clone();
             text_style.font_style = font.style;
@@ -7050,9 +7062,9 @@ pub fn render_breadcrumb_text(
         text_style.color = if multibuffer_header {
             Color::Muted.color(cx)
         } else if index + 1 == path_segment_count {
-            gpui::rgb(0xD3D1DF).into()
+            cx.theme().colors().text
         } else {
-            gpui::rgb(0x9EA2B5).into()
+            cx.theme().colors().text_muted
         };
         if !multibuffer_header {
             text_style.font_size = px(12.).into();
@@ -7083,7 +7095,7 @@ pub fn render_breadcrumb_text(
                 Some(
                     Label::new("›")
                         .size(LabelSize::Custom(rems(12. / 16.)))
-                        .color(Color::Custom(gpui::rgb(0x9EA2B5).into()))
+                        .color(Color::Muted)
                         .into_any_element(),
                 )
             };
@@ -7113,27 +7125,32 @@ pub fn render_breadcrumb_text(
     let has_project_path = active_item.project_path(cx).is_some();
 
     let task_controls = if !multibuffer_header && has_project_path {
-        let mut actions: Vec<(&str, SharedString, u32, Box<dyn gpui::Action>)> = vec![(
+        let mut actions: Vec<(&str, SharedString, gpui::Hsla, Box<dyn gpui::Action>)> = vec![(
             "Run",
             "icons/paper_run.svg".into(),
-            0xAAC8AD,
+            cx.theme().status().success,
             zed_actions::Spawn::modal().boxed_clone(),
         )];
         if let Some(action) = cx.build_action("debugger::Start", None).log_err() {
-            actions.push(("Debug", IconName::Debug.path().into(), 0xC9B9DD, action));
+            actions.push((
+                "Debug",
+                IconName::Debug.path().into(),
+                cx.theme().colors().debugger_accent,
+                action,
+            ));
         }
         actions.extend(
             [
                 (
                     "Build",
                     SharedString::from(IconName::ToolHammer.path()),
-                    0xC7BEA8,
+                    cx.theme().status().warning,
                     "build",
                 ),
                 (
                     "Test",
                     SharedString::from("icons/paper_test.svg"),
-                    0xB7B8C7,
+                    cx.theme().colors().text_muted,
                     "test",
                 ),
             ]
@@ -7153,7 +7170,7 @@ pub fn render_breadcrumb_text(
         Some(
             h_flex()
                 .flex_none()
-                .gap(px(4.))
+                .gap(px(10.))
                 .children(actions.into_iter().map(|(label, icon, color, action)| {
                     ButtonLike::new(label)
                         .size(ui::ButtonSize::None)
@@ -7161,22 +7178,22 @@ pub fn render_breadcrumb_text(
                         .corner_radius(px(5.))
                         .style(ButtonStyle::Transparent)
                         .when(label == "Run", |this| {
-                            this.background(gpui::rgb(0x2D3934).into())
+                            this.background(cx.theme().status().created_background)
                         })
                         .child(
                             h_flex()
-                                .px(px(6.))
+                                .px(px(7.))
                                 .gap(px(6.))
                                 .child(
                                     Icon::from_path(icon)
                                         .size(IconSize::Small)
-                                        .color(Color::Custom(gpui::rgb(color).into())),
+                                        .color(Color::Custom(color)),
                                 )
                                 .child(
                                     div()
                                         .text_size(px(11.))
                                         .line_height(px(14.))
-                                        .text_color(gpui::rgb(color))
+                                        .text_color(color)
                                         .child(ui::localized(label, cx)),
                                 ),
                         )
@@ -7195,77 +7212,81 @@ pub fn render_breadcrumb_text(
             .id("breadcrumb_container")
             .when(!multibuffer_header, |this| this.overflow_x_scroll())
             .child(
-                ButtonLike::new("toggle outline view")
-                    .when(!multibuffer_header, |this| {
-                        this.full_width()
-                            .height(px(30.).into())
-                            .size(ui::ButtonSize::None)
-                            .style(ButtonStyle::Transparent)
-                    })
-                    .child(breadcrumbs)
-                    .when(multibuffer_header, |this| {
-                        this.style(ButtonStyle::Transparent)
-                    })
-                    .when(!multibuffer_header, |this| {
-                        let focus_handle = editor.upgrade().unwrap().focus_handle(&cx);
+                div().flex_1().min_w_0().child(
+                    ButtonLike::new("toggle outline view")
+                        .when(!multibuffer_header, |this| {
+                            this.full_width()
+                                .height(px(32.).into())
+                                .size(ui::ButtonSize::None)
+                                .style(ButtonStyle::Transparent)
+                        })
+                        .child(breadcrumbs)
+                        .when(multibuffer_header, |this| {
+                            this.style(ButtonStyle::Transparent)
+                        })
+                        .when(!multibuffer_header, |this| {
+                            let focus_handle = editor.upgrade().unwrap().focus_handle(&cx);
 
-                        this.tooltip(Tooltip::element(move |_window, cx| {
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .justify_between()
-                                        .child(Label::new("Show Symbol Outline"))
-                                        .child(ui::KeyBinding::for_action_in(
-                                            &zed_actions::outline::ToggleOutline,
-                                            &focus_handle,
-                                            cx,
-                                        )),
-                                )
-                                .when(has_project_path, |this| {
-                                    this.child(
+                            this.tooltip(Tooltip::element(move |_window, cx| {
+                                v_flex()
+                                    .gap_1()
+                                    .child(
                                         h_flex()
                                             .gap_1()
                                             .justify_between()
-                                            .pt_1()
-                                            .border_t_1()
-                                            .border_color(cx.theme().colors().border_variant)
-                                            .child(Label::new("Right-Click to Copy Path")),
+                                            .child(Label::new("Show Symbol Outline"))
+                                            .child(ui::KeyBinding::for_action_in(
+                                                &zed_actions::outline::ToggleOutline,
+                                                &focus_handle,
+                                                cx,
+                                            )),
                                     )
-                                })
-                                .into_any_element()
-                        }))
-                        .on_click({
-                            let editor = editor.clone();
-                            move |_, window, cx| {
-                                if let Some((editor, callback)) = editor
-                                    .upgrade()
-                                    .zip(zed_actions::outline::TOGGLE_OUTLINE.get())
-                                {
-                                    callback(editor.to_any_view(), window, cx);
-                                }
-                            }
-                        })
-                        .when(has_project_path, |this| {
-                            this.on_right_click({
+                                    .when(has_project_path, |this| {
+                                        this.child(
+                                            h_flex()
+                                                .gap_1()
+                                                .justify_between()
+                                                .pt_1()
+                                                .border_t_1()
+                                                .border_color(cx.theme().colors().border_variant)
+                                                .child(Label::new("Right-Click to Copy Path")),
+                                        )
+                                    })
+                                    .into_any_element()
+                            }))
+                            .on_click({
                                 let editor = editor.clone();
-                                move |_, _, cx| {
-                                    if let Some(abs_path) = editor.upgrade().and_then(|editor| {
-                                        editor.update(cx, |editor, cx| {
-                                            editor.target_file_abs_path(cx)
-                                        })
-                                    }) {
-                                        if let Some(path_str) = abs_path.to_str() {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                path_str.to_string(),
-                                            ));
-                                        }
+                                move |_, window, cx| {
+                                    if let Some((editor, callback)) = editor
+                                        .upgrade()
+                                        .zip(zed_actions::outline::TOGGLE_OUTLINE.get())
+                                    {
+                                        callback(editor.to_any_view(), window, cx);
                                     }
                                 }
                             })
-                        })
-                    }),
+                            .when(has_project_path, |this| {
+                                this.on_right_click({
+                                    let editor = editor.clone();
+                                    move |_, _, cx| {
+                                        if let Some(abs_path) =
+                                            editor.upgrade().and_then(|editor| {
+                                                editor.update(cx, |editor, cx| {
+                                                    editor.target_file_abs_path(cx)
+                                                })
+                                            })
+                                        {
+                                            if let Some(path_str) = abs_path.to_str() {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    path_str.to_string(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                })
+                            })
+                        }),
+                ),
             )
             .when_some(task_controls, |this, controls| {
                 this.child(
@@ -7274,7 +7295,7 @@ pub fn render_breadcrumb_text(
                         .h(px(14.))
                         .mx(px(10.))
                         .flex_none()
-                        .bg(gpui::rgb(0x414453)),
+                        .bg(cx.theme().colors().border),
                 )
                 .child(controls)
             })
