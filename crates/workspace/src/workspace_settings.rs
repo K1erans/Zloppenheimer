@@ -13,6 +13,11 @@ use settings::{CommandAliasTarget, SettingsStore};
 
 #[derive(RegisterSetting)]
 pub struct WorkspaceSettings {
+    pub app_language: settings::AppLanguage,
+    pub default_file_open_destination: settings::FileOpenDestination,
+    pub projectless_task_folder: String,
+    pub show_bottom_panel_button: bool,
+    pub show_in_menu_bar: bool,
     pub active_pane_modifiers: ActivePanelModifiers,
     pub bottom_dock_layout: settings::BottomDockLayout,
     pub pane_split_direction_horizontal: settings::PaneSplitDirectionHorizontal,
@@ -50,9 +55,27 @@ pub struct WorkspaceSettings {
 
 #[cfg(target_os = "macos")]
 pub fn closing_last_window_quits_app(cx: &App) -> bool {
-    WorkspaceSettings::get_global(cx)
-        .on_last_window_closed
-        .is_quit_app()
+    let settings = WorkspaceSettings::get_global(cx);
+    !settings.show_in_menu_bar && settings.on_last_window_closed.is_quit_app()
+}
+
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn test_menu_bar_mode_keeps_app_running(cx: &mut gpui::TestAppContext) {
+    use gpui::BorrowAppContext;
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        for (menu_bar_enabled, should_quit) in [(true, false), (false, true)] {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.set_user_settings(
+                    &format!("{{\"show_in_menu_bar\":{menu_bar_enabled},\"on_last_window_closed\":\"quit_app\"}}"),
+                    cx,
+                ).expect("valid menu bar settings");
+            });
+            assert_eq!(closing_last_window_quits_app(cx), should_quit);
+        }
+    });
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -97,6 +120,16 @@ impl Settings for WorkspaceSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         let workspace = &content.workspace;
         Self {
+            show_in_menu_bar: workspace.show_in_menu_bar.unwrap_or(true),
+            app_language: workspace.app_language.unwrap_or_default(),
+            default_file_open_destination: workspace
+                .default_file_open_destination
+                .unwrap_or_default(),
+            show_bottom_panel_button: workspace.show_bottom_panel_button.unwrap_or(true),
+            projectless_task_folder: workspace
+                .projectless_task_folder
+                .clone()
+                .unwrap_or_else(|| "~/Documents/Zloppenheimer".into()),
             active_pane_modifiers: ActivePanelModifiers {
                 border_size: Some(
                     *workspace

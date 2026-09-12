@@ -12,6 +12,7 @@ use crate::{IconName, IconSize};
 pub enum IconButtonShape {
     Square,
     Wide,
+    Circle,
 }
 
 #[derive(IntoElement, RegisterComponent)]
@@ -21,6 +22,7 @@ pub struct IconButton {
     icon: IconName,
     icon_size: IconSize,
     icon_color: Color,
+    disabled_icon_color: Option<Color>,
     selected_icon: Option<IconName>,
     selected_icon_color: Option<Color>,
     selected_style: Option<ButtonStyle>,
@@ -37,6 +39,7 @@ impl IconButton {
             icon,
             icon_size: IconSize::default(),
             icon_color: Color::Default,
+            disabled_icon_color: None,
             selected_icon: None,
             selected_icon_color: None,
             selected_style: None,
@@ -50,6 +53,26 @@ impl IconButton {
 
     pub fn shape(mut self, shape: IconButtonShape) -> Self {
         self.shape = shape;
+        self
+    }
+
+    pub fn height(mut self, height: DefiniteLength) -> Self {
+        self.base = self.base.height(height);
+        self
+    }
+
+    pub fn corner_radius(mut self, radius: gpui::Pixels) -> Self {
+        self.base = self.base.corner_radius(radius);
+        self
+    }
+
+    pub fn background(mut self, background: Hsla) -> Self {
+        self.base = self.base.background(background);
+        self
+    }
+
+    pub fn disabled_icon_color(mut self, color: Color) -> Self {
+        self.disabled_icon_color = Some(color);
         self
     }
 
@@ -241,7 +264,7 @@ impl RenderOnce for IconButton {
             .unwrap_or(self.icon);
 
         let icon_color = if is_disabled {
-            Color::Disabled
+            self.disabled_icon_color.unwrap_or(Color::Disabled)
         } else if self.selected_style.is_some() && is_selected {
             self.selected_style.unwrap().into()
         } else if is_selected {
@@ -260,6 +283,14 @@ impl RenderOnce for IconButton {
                     this.width(size).height(size.into())
                 }
                 IconButtonShape::Wide => this,
+                IconButtonShape::Circle => {
+                    let size = this
+                        .width
+                        .unwrap_or_else(|| self.icon_size.square(window, cx).into());
+                    let mut button = this.width(size).height(size).rounding(None);
+                    button.base = button.base.rounded_full();
+                    button
+                }
             })
             .child(match self.indicator {
                 Some(indicator) => IconWithIndicator::new(icon_element, Some(indicator))

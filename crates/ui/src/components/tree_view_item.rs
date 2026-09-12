@@ -15,6 +15,7 @@ pub struct TreeViewItem {
     focused: bool,
     default_expanded: bool,
     root_item: bool,
+    navigation_style: bool,
     tooltip: Option<Box<dyn Fn(&mut Window, &mut App) -> AnyView + 'static>>,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     on_hover: Option<Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
@@ -36,6 +37,7 @@ impl TreeViewItem {
             focused: false,
             default_expanded: false,
             root_item: false,
+            navigation_style: false,
             tooltip: None,
             on_click: None,
             on_hover: None,
@@ -105,6 +107,11 @@ impl TreeViewItem {
         self
     }
 
+    pub fn navigation_style(mut self, enabled: bool) -> Self {
+        self.navigation_style = enabled;
+        self
+    }
+
     pub fn focused(mut self, focused: bool) -> Self {
         self.focused = focused;
         self
@@ -158,6 +165,7 @@ impl RenderOnce for TreeViewItem {
 
         h_flex()
             .id(self.id)
+            .when(self.navigation_style, |this| this.pb(px(4.)))
             .when_some(self.group_name, |this, group| this.group(group))
             .w_full()
             .child(
@@ -186,8 +194,34 @@ impl RenderOnce for TreeViewItem {
                         this.border_color(selected_border).bg(selected_bg)
                     })
                     .hover(|s| s.bg(cx.theme().colors().element_hover))
+                    .when(self.navigation_style, |this| {
+                        this.h(px(36.))
+                            .px(px(11.))
+                            .rounded(px(6.))
+                            .when(self.selected, |this| {
+                                this.bg(gpui::rgb(0x373342))
+                                    .border_color(transparent_border)
+                            })
+                    })
                     .map(|this| {
                         let label = self.label;
+
+                        if self.navigation_style {
+                            return this.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .when(!self.root_item, |this| this.pl(px(22.)))
+                                    .text_size(px(14.))
+                                    .line_height(px(20.))
+                                    .text_color(gpui::rgb(if self.selected {
+                                        0xE2D8EE
+                                    } else {
+                                        0xBFC1D1
+                                    }))
+                                    .child(label),
+                            );
+                        }
 
                         if self.root_item {
                             this.child(

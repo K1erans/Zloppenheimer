@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use super::*;
+use crate::dock::test::TestPanel;
 use crate::item::test::TestItem;
 use agent_settings::AgentSettings;
 use client::proto;
@@ -317,6 +318,145 @@ async fn test_open_new_window_does_not_open_sidebar_on_existing_window(cx: &mut 
 }
 
 #[gpui::test]
+async fn test_blank_window_shows_sidebar_but_project_window_does_not(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let app_state = cx.update(AppState::test);
+    let fs = app_state.fs.as_fake();
+    fs.insert_tree(path!("/project"), json!({ "file.txt": "" }))
+        .await;
+
+    // A blank window shows the home screen, which has no project of its own to
+    // reach the sidebar from, so the sidebar is visible without opening a repo.
+    let blank_project = Project::test(app_state.fs.clone(), [], cx).await;
+    let blank_window =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(blank_project, window, cx));
+    blank_window
+        .read_with(cx, |mw, _cx| {
+            assert!(
+                mw.sidebar_open(),
+                "a window with no project should show the sidebar",
+            );
+        })
+        .unwrap();
+
+    // Showing the sidebar must not pin the blank workspace into a project group.
+    blank_window
+        .read_with(cx, |mw, _cx| {
+            assert!(
+                mw.project_group_keys().is_empty(),
+                "a blank window should not be retained as a project group",
+            );
+        })
+        .unwrap();
+
+    // Toggling still closes it, so the default is a starting point, not a lock.
+    blank_window
+        .update(cx, |mw, window, cx| {
+            mw.toggle_sidebar(window, cx);
+            assert!(!mw.sidebar_open(), "the sidebar should still be closable");
+        })
+        .unwrap();
+
+    // A window opened onto a project keeps the sidebar closed until asked for.
+    let project = Project::test(app_state.fs.clone(), [path!("/project").as_ref()], cx).await;
+    let project_window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    project_window
+        .read_with(cx, |mw, _cx| {
+            assert!(
+                !mw.sidebar_open(),
+                "a window opened onto a project should start with the sidebar closed",
+            );
+        })
+        .unwrap();
+}
+
+struct TestSidebar {
+    focus_handle: FocusHandle,
+}
+
+impl Focusable for TestSidebar {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<SidebarEvent> for TestSidebar {}
+
+impl Render for TestSidebar {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+impl Sidebar for TestSidebar {
+    fn width(&self, _cx: &App) -> Pixels {
+        px(200.)
+    }
+
+    fn set_width(&mut self, _width: Option<Pixels>, _cx: &mut Context<Self>) {}
+
+    fn has_notifications(&self, _cx: &App) -> bool {
+        false
+    }
+
+    fn side(&self, _cx: &App) -> SidebarSide {
+        SidebarSide::Left
+    }
+}
+
+#[gpui::test]
+async fn test_registering_sidebar_on_open_blank_window_hosts_panels(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let app_state = cx.update(AppState::test);
+    let blank_project = Project::test(app_state.fs.clone(), [], cx).await;
+    let blank_window =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(blank_project, window, cx));
+
+    let panel = blank_window
+        .update(cx, |mw, window, cx| {
+            assert!(mw.sidebar_open(), "a blank window should show the sidebar");
+            mw.workspace().update(cx, |workspace, cx| {
+                let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+                workspace.add_panel(panel.clone(), window, cx);
+                assert!(
+                    !workspace.is_panel_hosted_in_sidebar(&panel, cx),
+                    "without a sidebar registered there is nothing to host the panel",
+                );
+                panel
+            })
+        })
+        .unwrap();
+
+    // The sidebar is registered after the window is built, so registering it
+    // while the sidebar is already open must hand the panels over.
+    blank_window
+        .update(cx, |mw, _window, cx| {
+            let sidebar = cx.new(|cx| TestSidebar {
+                focus_handle: cx.focus_handle(),
+            });
+            mw.register_sidebar(sidebar, cx);
+            mw.workspace().read_with(cx, |workspace, cx| {
+                assert!(workspace.is_panel_hosted_in_sidebar(&panel, cx));
+            });
+        })
+        .unwrap();
+
+    // A persisted "closed" state from the previous session overrides the
+    // blank-window default and hands the panels back to the docks.
+    blank_window
+        .update(cx, |mw, _window, cx| {
+            mw.restore_closed_sidebar(cx);
+            assert!(!mw.sidebar_open());
+            mw.workspace().read_with(cx, |workspace, cx| {
+                assert!(!workspace.is_panel_hosted_in_sidebar(&panel, cx));
+            });
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 async fn test_open_directory_in_empty_workspace_does_not_open_sidebar(cx: &mut TestAppContext) {
     init_test(cx);
 
@@ -339,9 +479,13 @@ async fn test_open_directory_in_empty_workspace_does_not_open_sidebar(cx: &mut T
         mw
     });
 
+    // A blank window shows the sidebar by default, so close it first: this test
+    // is about `open_paths` not re-opening a sidebar the user has dismissed.
     window
-        .read_with(cx, |mw, _cx| {
-            assert!(!mw.sidebar_open(), "sidebar should start closed");
+        .update(cx, |mw, window, cx| {
+            assert!(mw.sidebar_open(), "a blank window should show the sidebar");
+            mw.close_sidebar(window, cx);
+            assert!(!mw.sidebar_open());
         })
         .unwrap();
 

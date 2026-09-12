@@ -365,6 +365,22 @@ impl MultiWorkspace {
         workspace.update(cx, |workspace, cx| {
             workspace.set_multi_workspace(weak_self, active_workspace_id.clone(), cx);
         });
+        // A window with no project shows the home screen, which has no project
+        // of its own to reach the sidebar from, so start with the sidebar open
+        // there. Windows that open onto a project keep it closed until it is
+        // toggled or a persisted session restores it. This only seeds the
+        // initial state: it deliberately skips `apply_open_sidebar`, so a blank
+        // window is not pinned into a project group just for showing the
+        // sidebar.
+        let sidebar_open = !DisableAiSettings::get_global(cx).disable_ai
+            && AgentSettings::get_global(cx).enabled
+            && workspace
+                .read(cx)
+                .project()
+                .read(cx)
+                .visible_worktrees(cx)
+                .next()
+                .is_none();
         Self {
             window_id: window.window_handle().window_id(),
             held: vec![HeldWorkspace {
@@ -375,7 +391,7 @@ impl MultiWorkspace {
             project_groups: Vec::new(),
             active_workspace_id,
             sidebar: None,
-            sidebar_open: false,
+            sidebar_open,
             sidebar_overlay: None,
             pending_removal_tasks: Vec::new(),
             _serialize_task: None,
@@ -396,6 +412,21 @@ impl MultiWorkspace {
                 }
             }));
         self.sidebar = Some(Box::new(sidebar));
+        // The sidebar is registered after the window is built, so it can already
+        // be open by then (a blank window shows it by default). Nothing else
+        // would hand the panels or the focus handle over in that case.
+        if self.sidebar_open {
+            let sidebar_focus_handle = self
+                .sidebar
+                .as_ref()
+                .map(|sidebar| sidebar.focus_handle(cx));
+            for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
+                    workspace.set_panels_hosted_in_sidebar(true, cx);
+                });
+            }
+        }
     }
 
     pub fn sidebar(&self) -> Option<&dyn SidebarHandle> {
@@ -499,13 +530,27 @@ impl MultiWorkspace {
         self.apply_open_sidebar(cx);
     }
 
+    /// Restores the sidebar to closed state from persisted session data without
+    /// firing a telemetry event, since this is not a user-initiated action.
+    pub(crate) fn restore_closed_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.apply_close_sidebar(cx);
+        self.previous_focus_handle.take();
+        self.serialize(cx);
+        cx.notify();
+    }
+
     fn apply_open_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = true;
         self.retain_active_workspace(cx);
-        let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
+        let sidebar_focus_handle = self
+            .sidebar
+            .as_ref()
+            .map(|sidebar| sidebar.focus_handle(cx));
+        let panels_hosted_in_sidebar = self.sidebar.is_some();
         for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
-            workspace.update(cx, |workspace, _cx| {
+            workspace.update(cx, |workspace, cx| {
                 workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
+                workspace.set_panels_hosted_in_sidebar(panels_hosted_in_sidebar, cx);
             });
         }
         self.serialize(cx);
@@ -518,16 +563,11 @@ impl MultiWorkspace {
             SidebarSide::Right => "right",
         };
         telemetry::event!("Sidebar Toggled", action = "close", side = side);
-        self.sidebar_open = false;
-        for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
-            workspace.update(cx, |workspace, _cx| {
-                workspace.set_sidebar_focus_handle(None);
-            });
-        }
+        self.apply_close_sidebar(cx);
         let sidebar_has_focus = self
             .sidebar
             .as_ref()
-            .is_some_and(|s| s.focus_handle(cx).contains_focused(window, cx));
+            .is_some_and(|sidebar| sidebar.focus_handle(cx).contains_focused(window, cx));
         if sidebar_has_focus {
             self.restore_previous_focus(true, window, cx);
         } else {
@@ -535,6 +575,18 @@ impl MultiWorkspace {
         }
         self.serialize(cx);
         cx.notify();
+    }
+
+    fn apply_close_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_open = false;
+        // Closing the sidebar hands the panels back to the docks, so they stay
+        // reachable rather than disappearing along with the sidebar.
+        for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.set_sidebar_focus_handle(None);
+                workspace.set_panels_hosted_in_sidebar(false, cx);
+            });
+        }
     }
 
     fn restore_previous_focus(&mut self, clear: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1432,12 +1484,18 @@ impl MultiWorkspace {
     }
 
     fn sync_sidebar_to_workspace(&self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
-        if self.sidebar_open() {
-            let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
-            workspace.update(cx, |workspace, _| {
+        let sidebar_focus_handle = self.sidebar_open().then(|| {
+            self.sidebar
+                .as_ref()
+                .map(|sidebar| sidebar.focus_handle(cx))
+        });
+        let panels_hosted_in_sidebar = self.sidebar.is_some() && self.sidebar_open();
+        workspace.update(cx, |workspace, cx| {
+            if let Some(sidebar_focus_handle) = sidebar_focus_handle {
                 workspace.set_sidebar_focus_handle(sidebar_focus_handle);
-            });
-        }
+            }
+            workspace.set_panels_hosted_in_sidebar(panels_hosted_in_sidebar, cx);
+        });
     }
 
     pub fn serialize(&mut self, cx: &mut Context<Self>) {
@@ -1462,8 +1520,11 @@ impl MultiWorkspace {
                     )
                 })
                 .collect::<Vec<_>>(),
-            sidebar_open: self.sidebar_open,
-            sidebar_state: self.sidebar.as_ref().and_then(|s| s.serialized_state(cx)),
+            sidebar_open: Some(self.sidebar_open),
+            sidebar_state: self
+                .sidebar
+                .as_ref()
+                .and_then(|sidebar| sidebar.serialized_state(cx)),
         };
         let window_id = self.window_id;
         let kvp = db::kvp::KeyValueStore::global(cx);
@@ -2179,6 +2240,19 @@ impl Render for MultiWorkspace {
                         .child(self.workspace().clone()),
                 )
                 .children(right_sidebar)
+                .child(
+                    h_flex()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(ui::utils::platform_title_bar_height(window))
+                        .justify_center()
+                        .text_size(px(12.))
+                        .line_height(px(18.))
+                        .text_color(cx.theme().colors().text_muted)
+                        .child("Zloppenheimer"),
+                )
                 .child(self.workspace().read(cx).modal_layer.clone())
                 .children(self.sidebar_overlay.as_ref().map(|view| {
                     deferred(div().absolute().size_full().inset_0().occlude().child(

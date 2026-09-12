@@ -34,6 +34,7 @@ pub struct ListItem {
     group_name: Option<SharedString>,
     disabled: bool,
     selected: bool,
+    selected_background: Option<gpui::Hsla>,
     spacing: ListItemSpacing,
     indent_level: usize,
     indent_step_size: Pixels,
@@ -55,6 +56,8 @@ pub struct ListItem {
     always_show_disclosure_icon: bool,
     outlined: bool,
     rounded: bool,
+    corner_radius: Option<Pixels>,
+    horizontal_padding: Option<Pixels>,
     overflow_x: bool,
     focused: Option<bool>,
     dock: Option<DockSide>,
@@ -73,6 +76,7 @@ impl ListItem {
             group_name: None,
             disabled: false,
             selected: false,
+            selected_background: None,
             spacing: ListItemSpacing::Dense,
             indent_level: 0,
             indent_step_size: px(12.),
@@ -91,6 +95,8 @@ impl ListItem {
             always_show_disclosure_icon: false,
             outlined: false,
             rounded: false,
+            corner_radius: None,
+            horizontal_padding: None,
             overflow_x: false,
             focused: None,
             dock: None,
@@ -254,6 +260,21 @@ impl ListItem {
         self
     }
 
+    pub fn corner_radius(mut self, radius: Pixels) -> Self {
+        self.corner_radius = Some(radius);
+        self
+    }
+
+    pub fn horizontal_padding(mut self, padding: Pixels) -> Self {
+        self.horizontal_padding = Some(padding);
+        self
+    }
+
+    pub fn selected_background(mut self, background: gpui::Hsla) -> Self {
+        self.selected_background = Some(background);
+        self
+    }
+
     pub fn overflow_x(mut self) -> Self {
         self.overflow_x = true;
         self
@@ -324,15 +345,19 @@ impl RenderOnce for ListItem {
                         .active(|style| style.bg(cx.theme().colors().ghost_element_active))
                         .when(self.outlined, |this| this.rounded_sm())
                         .when(self.selected, |this| {
-                            this.bg(cx.theme().colors().ghost_element_selected)
+                            this.bg(self
+                                .selected_background
+                                .unwrap_or(cx.theme().colors().ghost_element_selected))
                         })
                 })
             })
             .when(self.rounded, |this| this.rounded_sm())
+            .when_some(self.corner_radius, |this, radius| this.rounded(radius))
             .when_some(self.on_hover, |this, on_hover| this.on_hover(on_hover))
             .child(
                 h_flex()
                     .id("inner_list_item")
+                    .when(self.height.is_some(), |this| this.h_full())
                     // The accessible role/label live here, alongside the click
                     // handler, so assistive technology reports one actionable
                     // node (e.g. a menu item) rather than an inert container.
@@ -362,6 +387,7 @@ impl RenderOnce for ListItem {
                     .relative()
                     .gap_1()
                     .px(DynamicSpacing::Base06.rems(cx))
+                    .when_some(self.horizontal_padding, |this, padding| this.px(padding))
                     .map(|this| match self.spacing {
                         ListItemSpacing::Dense => this,
                         ListItemSpacing::ExtraDense => this.py_neg_px(),
@@ -380,7 +406,9 @@ impl RenderOnce for ListItem {
                             this.hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
                                 .active(|style| style.bg(cx.theme().colors().ghost_element_active))
                                 .when(self.selected, |this| {
-                                    this.bg(cx.theme().colors().ghost_element_selected)
+                                    this.bg(self
+                                        .selected_background
+                                        .unwrap_or(cx.theme().colors().ghost_element_selected))
                                 })
                         })
                     })

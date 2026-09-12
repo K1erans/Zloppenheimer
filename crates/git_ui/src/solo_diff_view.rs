@@ -27,7 +27,8 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use ui::{DiffStat, Divider, Tooltip, prelude::*};
+use ui::{ButtonLike, DiffStat, Divider, Tooltip, prelude::*};
+use util::ResultExt;
 use util::paths::{PathExt as _, PathStyle};
 use workspace::{
     Item, ItemHandle, ItemNavHistory, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
@@ -47,6 +48,7 @@ pub struct SoloDiffView {
     workspace: WeakEntity<Workspace>,
     showing_full_file: bool,
     _settings_subscription: Subscription,
+    _repository_subscription: Subscription,
 }
 
 impl SoloDiffView {
@@ -133,7 +135,7 @@ impl SoloDiffView {
         let multibuffer = cx
             .new(|cx| Self::build_multibuffer(buffer.clone(), diff.clone(), showing_full_file, cx));
         let editor = cx.new(|cx| {
-            let editor = SplittableEditor::new(
+            let mut editor = SplittableEditor::new(
                 EditorSettings::get_global(cx).diff_view_style,
                 multibuffer,
                 project.clone(),
@@ -141,6 +143,7 @@ impl SoloDiffView {
                 window,
                 cx,
             );
+            editor.set_review_style(true);
             editor.rhs_editor().update(cx, |editor, cx| {
                 editor.set_should_serialize(false, cx);
                 editor.set_allow_git_diff_scrollbar_markers(showing_full_file, cx);
@@ -172,6 +175,7 @@ impl SoloDiffView {
                 }
             });
 
+        let repository_subscription = cx.observe(&repository, |_, _, cx| cx.notify());
         Self {
             repository,
             repository_id,
@@ -182,7 +186,222 @@ impl SoloDiffView {
             workspace: workspace.downgrade(),
             showing_full_file,
             _settings_subscription: settings_subscription,
+            _repository_subscription: repository_subscription,
         }
+    }
+
+    fn render_recent_commits(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (entries, loading, error) = self.repository.update(cx, |repository, cx| {
+            let source = repository
+                .branch
+                .as_ref()
+                .map(|branch| git::repository::LogSource::Branch(branch.name().to_owned().into()))
+                .or_else(|| {
+                    repository
+                        .head_commit
+                        .as_ref()
+                        .and_then(|commit| commit.sha.parse().ok())
+                        .map(git::repository::LogSource::Sha)
+                });
+            let Some(source) = source else {
+                return (Vec::new(), false, None);
+            };
+            let response =
+                repository.graph_data(source, git::repository::LogOrder::DateOrder, 0..3, cx);
+            let commits = response
+                .commits
+                .iter()
+                .take(3)
+                .map(|commit| commit.sha)
+                .collect::<Vec<_>>();
+            let loading = response.is_loading;
+            let error = response.error;
+            let entries = commits
+                .into_iter()
+                .map(|sha| {
+                    let data = match repository.fetch_commit_data(sha, false, cx) {
+                        project::git_store::CommitDataState::Loaded(data) => Some(data.clone()),
+                        project::git_store::CommitDataState::Loading(_) => None,
+                    };
+                    (sha, data)
+                })
+                .collect::<Vec<_>>();
+            (entries, loading, error)
+        });
+        let branch = self.repository.read(cx).branch.clone();
+        v_flex()
+            .h(px(172.))
+            .flex_none()
+            .px(px(28.))
+            .bg(gpui::rgb(0x22252F))
+            .border_t_1()
+            .border_color(gpui::rgb(0x3C3F4C))
+            .child(
+                h_flex()
+                    .h(px(44.))
+                    .flex_none()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(0xD9DCE8))
+                            .child("Recent commits"),
+                    )
+                    .child(
+                        ButtonLike::new("view-git-history")
+                            .size(ButtonSize::None)
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(gpui::rgb(0xBEB4D0))
+                                    .child("View history ↗"),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.workspace
+                                    .update(cx, |workspace, cx| {
+                                        workspace
+                                            .open_panel::<crate::git_panel::GitPanel>(window, cx);
+                                        if let Some(panel) =
+                                            workspace.panel::<crate::git_panel::GitPanel>(cx)
+                                        {
+                                            panel.focus_handle(cx).dispatch_action(
+                                                &crate::git_panel::ActivateHistoryTab,
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    })
+                                    .log_err();
+                            })),
+                    ),
+            )
+            .when(entries.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(gpui::rgb(0xA4A8BB))
+                        .child(error.unwrap_or_else(|| {
+                            if loading {
+                                "Loading commits…".into()
+                            } else {
+                                "No commits yet".into()
+                            }
+                        })),
+                )
+            })
+            .children(entries.into_iter().enumerate().map(|(index, (sha, data))| {
+                let subject = data
+                    .as_ref()
+                    .map(|data| data.subject.clone())
+                    .unwrap_or_else(|| "Loading…".into());
+                let relative_time = data
+                    .as_ref()
+                    .and_then(|data| {
+                        time::OffsetDateTime::from_unix_timestamp(data.commit_timestamp).ok()
+                    })
+                    .map(|timestamp| {
+                        time_format::format_localized_timestamp(
+                            timestamp,
+                            time::OffsetDateTime::now_utc(),
+                            time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
+                            time_format::TimestampFormat::Relative,
+                        )
+                    })
+                    .unwrap_or_default();
+                let branch_label = branch
+                    .as_ref()
+                    .and_then(|branch| {
+                        let tracking = branch
+                            .upstream
+                            .as_ref()
+                            .and_then(|upstream| upstream.tracking.status());
+                        if index == 0 {
+                            Some(match tracking {
+                                Some(status) if status.ahead > 0 => {
+                                    format!("{} · {} ahead", branch.name(), status.ahead)
+                                }
+                                _ => branch.name().to_owned(),
+                            })
+                        } else {
+                            branch
+                                .upstream
+                                .as_ref()
+                                .filter(|_| {
+                                    tracking.is_some_and(|status| {
+                                        status.behind == 0 && status.ahead as usize == index
+                                    })
+                                })
+                                .map(|upstream| {
+                                    upstream
+                                        .ref_name
+                                        .trim_start_matches("refs/remotes/")
+                                        .to_owned()
+                                })
+                        }
+                    })
+                    .unwrap_or_default();
+                let repository = self.repository.downgrade();
+                let workspace = self.workspace.clone();
+                h_flex()
+                    .id(SharedString::from(sha.to_string()))
+                    .h(px(36.))
+                    .gap(px(12.))
+                    .border_t_1()
+                    .border_color(gpui::rgb(0x353846))
+                    .cursor_pointer()
+                    .child(
+                        Icon::new(IconName::Circle)
+                            .size(IconSize::Custom(rems(10. / 16.)))
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(0xC4C7D7))
+                            .child(subject),
+                    )
+                    .child(
+                        div()
+                            .w(px(158.))
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(0xBEB4D0))
+                            .child(branch_label),
+                    )
+                    .child(
+                        div()
+                            .w(px(110.))
+                            .text_size(px(11.))
+                            .text_color(gpui::rgb(0xA4A8BB))
+                            .child(sha.to_string().chars().take(7).collect::<String>()),
+                    )
+                    .child(
+                        div()
+                            .w(px(90.))
+                            .text_right()
+                            .text_size(px(11.))
+                            .text_color(gpui::rgb(0xA4A8BB))
+                            .child(relative_time),
+                    )
+                    .on_click(move |_, window, cx| {
+                        crate::commit_view::CommitView::open(
+                            sha.to_string(),
+                            repository.clone(),
+                            workspace.clone(),
+                            None,
+                            None,
+                            window,
+                            cx,
+                        );
+                    })
+            }))
+            .into_any_element()
     }
 
     fn build_multibuffer(
@@ -480,7 +699,7 @@ impl Item for SoloDiffView {
     }
 
     fn breadcrumb_location(&self, _: &App) -> ToolbarItemLocation {
-        ToolbarItemLocation::PrimaryLeft
+        ToolbarItemLocation::Hidden
     }
 
     fn breadcrumbs(&self, cx: &App) -> Option<(Vec<HighlightedText>, Option<gpui::Font>)> {
@@ -546,8 +765,90 @@ impl Item for SoloDiffView {
 }
 
 impl Render for SoloDiffView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.editor.clone()
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let repository = self.repository.read(cx);
+        let path = format!(
+            "{} / {}",
+            repository.display_name().trim_end_matches('/'),
+            self.repo_path.as_std_path().display()
+        );
+        let diff_stat = repository
+            .status_for_path(&self.repo_path)
+            .and_then(|entry| entry.diff_stat);
+        let states = self.button_states(cx);
+        let stage = states.stage_file;
+        v_flex()
+            .size_full()
+            .child(
+                h_flex()
+                    .h(px(62.))
+                    .flex_none()
+                    .px(px(28.))
+                    .gap(px(12.))
+                    .border_b_1()
+                    .border_color(gpui::rgb(0x3A3D4A))
+                    .child(Icon::new(IconName::File).size(IconSize::Custom(rems(17. / 16.))))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_size(px(13.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(0xDADDE8))
+                            .child(path),
+                    )
+                    .when_some(diff_stat, |this, stat| {
+                        this.child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(gpui::rgb(0xA8C9B2))
+                                .child(format!("+{}", stat.added)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(gpui::rgb(0xD6A4AA))
+                                .child(format!("−{}", stat.deleted)),
+                        )
+                    })
+                    .child(DiffStyleControls::new(self.editor.clone()).labeled())
+                    .child(
+                        ButtonLike::new("review-stage-file")
+                            .size(ButtonSize::None)
+                            .height(px(32.).into())
+                            .custom_style(|this| {
+                                this.px(px(11.))
+                                    .border_1()
+                                    .border_color(gpui::rgb(0x60546E))
+                            })
+                            .corner_radius(px(6.))
+                            .background(gpui::rgb(0x3C3448).into())
+                            .disabled(!stage && !states.unstage_file)
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(gpui::rgb(0xE2D2ED))
+                                    .child(if stage {
+                                        "Stage file +"
+                                    } else {
+                                        "Unstage file −"
+                                    }),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.change_file_stage(stage, window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .pt(px(20.))
+                    .child(self.editor.clone()),
+            )
+            .child(self.render_recent_commits(cx))
     }
 }
 
@@ -589,11 +890,7 @@ impl ToolbarItemView for SoloDiffStyleToolbar {
         self.solo_diff = active_pane_item
             .and_then(|item| item.act_as::<SoloDiffView>(cx))
             .map(|entity| entity.downgrade());
-        if self.solo_diff.is_some() {
-            ToolbarItemLocation::PrimaryLeft
-        } else {
-            ToolbarItemLocation::Hidden
-        }
+        ToolbarItemLocation::Hidden
     }
 }
 
@@ -692,11 +989,7 @@ impl ToolbarItemView for SoloDiffGitToolbar {
         self.solo_diff = active_pane_item
             .and_then(|item| item.act_as::<SoloDiffView>(cx))
             .map(|entity| entity.downgrade());
-        if self.solo_diff.is_some() {
-            ToolbarItemLocation::PrimaryRight
-        } else {
-            ToolbarItemLocation::Hidden
-        }
+        ToolbarItemLocation::Hidden
     }
 }
 

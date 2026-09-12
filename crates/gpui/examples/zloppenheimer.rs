@@ -4,9 +4,9 @@
 //!
 //! Renders the custom title bar, the project sidebar (with a "Kode" project row
 //! that exposes file-tree actions), the empty-thread prompt, and a bottom
-//! account bar. The account name and plan shown in that bar are taken from the
-//! signed-in Zed account rather than being hardcoded into the view (see
-//! [`ZedAccount::from_zed_login`]).
+//! account bar. This is a static mockup: the controls are drawn but do nothing,
+//! and the sidebar contents and account details are placeholder data (see
+//! [`ZedAccount::placeholder`]).
 
 use std::borrow::Cow;
 use std::fs;
@@ -14,29 +14,40 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use gpui::{
-    App, AssetSource, Bounds, Context, FontWeight, SharedString, Window, WindowBounds,
-    WindowDecorations, WindowOptions, div, prelude::*, px, rgb, size, svg,
+    App, AssetSource, Bounds, Context, FontWeight, SharedString, TitlebarOptions, Window,
+    WindowBounds, WindowDecorations, WindowOptions, div, point, prelude::*, px, rgb, size, svg,
 };
 use gpui_platform::application;
 
 const FONT_FAMILY: &str = "IBM Plex Sans";
 
+/// Where macOS draws the native traffic lights inside a transparent title bar,
+/// and the room the title bar leaves for them (the same amount Zed reserves).
+const TRAFFIC_LIGHT_POSITION: f32 = 9.;
+const TRAFFIC_LIGHT_PADDING: f32 = 71.;
+
+/// Height of the composer capsule. The toolbar sits directly beneath it, so
+/// the container reserves this much room before laying the toolbar out.
+const COMPOSER_HEIGHT: f32 = 49.;
+
 // Dark "navy slate" palette matching the mockup.
 const BG: u32 = 0x191c24; // main content background
 const SIDEBAR_BG: u32 = 0x15171f; // sidebar background
 const BAR_BG: u32 = 0x181b23; // title bar background
-const PANEL_BG: u32 = 0x212633; // raised prompt panel
+const PANEL_BG: u32 = 0x2b2d3d; // composer capsule
+const TOOLBAR_BG: u32 = 0x2d2f3f; // toolbar tucked under the composer
 const ELEV_BG: u32 = 0x272c38; // pill / control background
 const HOVER_BG: u32 = 0x2d3340; // hovered control background
 const BORDER: u32 = 0x282d3a; // separators and control borders
 const TEXT: u32 = 0xe7e9f0; // primary text
 const MUTED: u32 = 0x9aa1b2; // secondary text
 const DIM: u32 = 0x6b7280; // icons and tertiary text
-const ACCENT: u32 = 0x7c6cf0; // send button
-const CLAUDE: u32 = 0xd97757; // Anthropic "clay" accent
-const DOT_RED: u32 = 0xff5f57;
-const DOT_YELLOW: u32 = 0xfebc2e;
-const DOT_GREEN: u32 = 0x28c840;
+const PLACEHOLDER: u32 = 0xbebdc7; // composer placeholder text
+const TOOLBAR_TEXT: u32 = 0xb5b4bf; // toolbar labels and icons
+const TOOLBAR_SEPARATOR: u32 = 0x63687e; // toolbar group separators
+const STOP: u32 = 0xc87f7f; // stop-generating button
+const STOP_HOVER: u32 = 0xd69090; // hovered stop-generating button
+const ON_ACCENT: u32 = 0xffffff; // glyphs drawn on top of an accent fill
 
 // Zloppenheimer logo mark: four staggered bars on a rounded tile.
 const LOGO_BG: u32 = 0x0f1218;
@@ -46,7 +57,7 @@ const LOGO_PURPLE: u32 = 0xa181d1;
 const LOGO_BLUE: u32 = 0x3d84ed;
 const LOGO_GREEN: u32 = 0x7cae5f;
 
-/// The signed-in Zed account rendered in the bottom bar.
+/// The account rendered in the bottom bar.
 #[derive(Clone)]
 struct ZedAccount {
     display_name: SharedString,
@@ -54,24 +65,13 @@ struct ZedAccount {
 }
 
 impl ZedAccount {
-    /// Load the account from the Zed login session.
-    ///
-    /// In the full application this reads the authenticated user from Zed's
-    /// client user store. Here we resolve it from the environment so the bar
-    /// reflects whoever is actually logged in instead of a hardcoded value,
-    /// falling back to the account shown in the design.
-    fn from_zed_login() -> Self {
-        let display_name = std::env::var("ZED_ACCOUNT_NAME")
-            .ok()
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| "Kieran".to_string());
-        let plan = std::env::var("ZED_ACCOUNT_PLAN")
-            .ok()
-            .filter(|plan| !plan.trim().is_empty())
-            .unwrap_or_else(|| "Max".to_string());
+    /// The account shown in the design. A GPUI example cannot reach Zed's
+    /// client user store, so this is placeholder data rather than the
+    /// signed-in user.
+    fn placeholder() -> Self {
         Self {
-            display_name: display_name.into(),
-            plan: plan.into(),
+            display_name: "Kieran".into(),
+            plan: "Max".into(),
         }
     }
 
@@ -125,17 +125,20 @@ fn icon(path: &'static str, size_px: f32, color: u32) -> impl IntoElement {
 /// The Zloppenheimer logo, drawn as a vector so it stays crisp at any size:
 /// four staggered rounded bars (off-white, purple, blue, green) on a rounded
 /// tile. Proportions are expressed as fractions of `size` to match the brand
-/// artwork.
+/// artwork, then snapped to whole pixels: at title-bar sizes the bars are only
+/// a pixel or two tall, and fractional heights would blur them unevenly.
 fn logo_tile(size: f32) -> impl IntoElement {
-    let bar = |width_fraction: f32, color: u32, align_end: bool| {
+    let snap = |fraction: f32| (size * fraction).round().max(1.);
+    let bar_height = snap(0.061);
+    let bar = move |width_fraction: f32, color: u32, align_end: bool| {
         div()
             .flex()
             .w_full()
-            .h(px(size * 0.061))
+            .h(px(bar_height))
             .when(align_end, |row| row.justify_end())
             .child(
                 div()
-                    .w(px(size * width_fraction))
+                    .w(px(snap(width_fraction)))
                     .h_full()
                     .rounded_full()
                     .bg(rgb(color)),
@@ -153,15 +156,18 @@ fn logo_tile(size: f32) -> impl IntoElement {
         .flex()
         .flex_col()
         .justify_center()
-        .gap(px(size * 0.052))
-        .pl(px(size * 0.205))
-        .pr(px(size * 0.21))
+        .gap(px(snap(0.052)))
+        .pl(px(snap(0.205)))
+        .pr(px(snap(0.21)))
         .child(bar(0.585, LOGO_WHITE, false))
         .child(bar(0.435, LOGO_PURPLE, true))
         .child(bar(0.283, LOGO_BLUE, false))
         .child(bar(0.585, LOGO_GREEN, false))
 }
 
+/// The window controls are the platform's own: on macOS the native traffic
+/// lights are drawn over the transparent title bar, so the bar only leaves
+/// room for them.
 fn title_bar() -> impl IntoElement {
     div()
         .flex()
@@ -170,27 +176,17 @@ fn title_bar() -> impl IntoElement {
         .h(px(46.))
         .flex_none()
         .px_3()
+        .when(cfg!(target_os = "macos"), |this| {
+            this.pl(px(TRAFFIC_LIGHT_PADDING))
+        })
         .bg(rgb(BAR_BG))
         .border_b_1()
         .border_color(rgb(BORDER))
-        .child(traffic_lights())
         .child(brand())
         .child(divider())
         .child(breadcrumb())
         .child(div().flex_1())
         .child(title_bar_actions())
-}
-
-fn traffic_lights() -> impl IntoElement {
-    let dot = |color: u32| div().size_3().rounded_full().bg(rgb(color));
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .pr_1()
-        .child(dot(DOT_RED))
-        .child(dot(DOT_YELLOW))
-        .child(dot(DOT_GREEN))
 }
 
 fn brand() -> impl IntoElement {
@@ -395,8 +391,7 @@ fn account_footer(account: &ZedAccount) -> impl IntoElement {
         .child(account_bar(account))
 }
 
-/// The bottom login bar. The name and plan are sourced from the Zed account, and
-/// the avatar initial is derived from the account name.
+/// The bottom login bar. The avatar initial is derived from the account name.
 fn account_bar(account: &ZedAccount) -> impl IntoElement {
     div()
         .flex()
@@ -472,91 +467,134 @@ fn main_content() -> impl IntoElement {
         .child(prompt_panel())
 }
 
+/// The composer capsule together with the toolbar tucked beneath it. The
+/// toolbar takes its place in the column after an empty spacer the height of
+/// the capsule, and the capsule is then drawn over that spacer, so that the
+/// capsule's shadow falls across the toolbar instead of being covered by it.
 fn prompt_panel() -> impl IntoElement {
     div()
+        .relative()
         .flex()
         .flex_col()
         .w(px(680.))
-        .gap_3()
-        .p_3()
+        .child(div().h(px(COMPOSER_HEIGHT)).flex_none())
+        .child(composer_toolbar())
+        .child(div().absolute().top_0().left_0().w_full().child(composer()))
+}
+
+fn composer() -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .h(px(COMPOSER_HEIGHT))
+        .pl_6()
+        .pr_2()
+        .rounded_full()
         .bg(rgb(PANEL_BG))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .rounded_xl()
         .shadow_lg()
         .child(
             div()
-                .pt_1()
-                .pb_6()
-                .text_color(rgb(MUTED))
-                .child("Ask for changes, send follow-ups, or attach images"),
+                .flex_1()
+                .min_w_0()
+                .text_size(px(15.))
+                .text_color(rgb(PLACEHOLDER))
+                .child("Ask anything, @tag files/folders, $use skills, or / for commands"),
         )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(model_selector(
-                    "icons/ai_claude.svg",
-                    CLAUDE,
-                    "Claude Sonnet 5",
-                ))
-                .child(divider())
-                .child(model_selector_plain("High · 200k"))
-                .child(model_selector("icons/lock.svg", MUTED, "Full access"))
-                .child(div().flex_1())
-                .child(icon_button("icons/paperclip.svg"))
-                .child(send_button()),
-        )
+        .child(attach_button())
+        .child(stop_button())
 }
 
-fn model_selector(
-    icon_path: &'static str,
-    icon_color: u32,
+fn attach_button() -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size_8()
+        .flex_none()
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(HOVER_BG)))
+        .child(icon("icons/paperclip.svg", 18., TEXT))
+}
+
+/// Stops the in-flight response; the square glyph is drawn rather than loaded
+/// as an icon so it stays centered in the circle at any size.
+fn stop_button() -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size_8()
+        .flex_none()
+        .rounded_full()
+        .bg(rgb(STOP))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(STOP_HOVER)))
+        .child(div().size_2().rounded_sm().bg(rgb(ON_ACCENT)))
+}
+
+fn composer_toolbar() -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .h(px(32.))
+        .mx_2()
+        .px_1p5()
+        .rounded_b_xl()
+        .bg(rgb(TOOLBAR_BG))
+        .text_size(px(13.))
+        .text_color(rgb(TOOLBAR_TEXT))
+        .child(toolbar_button(
+            Some("icons/folder.svg"),
+            "Local checkout",
+            false,
+        ))
+        .child(toolbar_separator())
+        .child(toolbar_button(
+            Some("icons/ai_claude.svg"),
+            "Claude Opus 5",
+            true,
+        ))
+        .child(toolbar_separator())
+        .child(toolbar_button(None, "High · 200k", true))
+        .child(toolbar_separator())
+        .child(toolbar_button(Some("icons/lock.svg"), "Full access", true))
+        .child(div().flex_1())
+        .child(toolbar_button(Some("icons/git_branch.svg"), "main", true))
+}
+
+fn toolbar_button(
+    icon_path: Option<&'static str>,
     label: impl Into<SharedString>,
+    trailing_chevron: bool,
 ) -> impl IntoElement {
     div()
         .flex()
         .items_center()
         .gap_1p5()
-        .h(px(28.))
+        .h(px(24.))
         .px_2()
-        .rounded_lg()
-        .text_color(rgb(MUTED))
+        .rounded_md()
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(ELEV_BG)))
-        .child(icon(icon_path, 14., icon_color))
+        .hover(|style| style.bg(rgb(HOVER_BG)))
+        .when_some(icon_path, |this, icon_path| {
+            this.child(icon(icon_path, 14., TOOLBAR_TEXT))
+        })
         .child(label.into())
-        .child(icon("icons/chevron_down.svg", 12., DIM))
+        .when(trailing_chevron, |this| {
+            this.child(icon("icons/chevron_down.svg", 12., TOOLBAR_TEXT))
+        })
 }
 
-fn model_selector_plain(label: impl Into<SharedString>) -> impl IntoElement {
+fn toolbar_separator() -> impl IntoElement {
     div()
-        .flex()
-        .items_center()
-        .gap_1p5()
-        .h(px(28.))
-        .px_2()
-        .rounded_lg()
-        .text_color(rgb(MUTED))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(ELEV_BG)))
-        .child(label.into())
-        .child(icon("icons/chevron_down.svg", 12., DIM))
-}
-
-fn send_button() -> impl IntoElement {
-    div()
-        .size_7()
+        .w(px(1.))
+        .h(px(14.))
         .flex_none()
-        .rounded_full()
-        .bg(rgb(ACCENT))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(0x8f80f5)))
-        .child(icon("icons/arrow_up.svg", 16., 0xffffff))
+        .mx_1()
+        .bg(rgb(TOOLBAR_SEPARATOR))
 }
 
 struct Assets {
@@ -609,14 +647,21 @@ fn run_example() {
             let window = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: None,
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Zloppenheimer".into()),
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(
+                            px(TRAFFIC_LIGHT_POSITION),
+                            px(TRAFFIC_LIGHT_POSITION),
+                        )),
+                    }),
                     window_decorations: Some(WindowDecorations::Client),
                     window_min_size: Some(size(px(720.), px(480.))),
                     ..Default::default()
                 },
                 |_, cx| {
                     cx.new(|_| Zloppenheimer {
-                        account: ZedAccount::from_zed_login(),
+                        account: ZedAccount::placeholder(),
                     })
                 },
             );

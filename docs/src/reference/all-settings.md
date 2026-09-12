@@ -1556,7 +1556,7 @@ or
 
 - Description: Controls the appearance behavior of the tab's close button.
 - Setting: `show_close_button`
-- Default: `hover`
+- Default: `active`
 
 **Options**
 
@@ -1586,6 +1586,16 @@ or
 {
   "tabs": {
     "show_close_button": "hidden"
+  }
+}
+```
+
+4. Show it on the active tab:
+
+```json [settings]
+{
+  "tabs": {
+    "show_close_button": "active"
   }
 }
 ```
@@ -3759,6 +3769,13 @@ Examples:
 
 List of `string` glob patterns
 
+## Projectless Task Folder
+
+- Setting: `projectless_task_folder`
+- Default: `"~/Documents/Zloppenheimer"`
+
+Starting a thread in an empty local workspace creates a task directory beneath this folder and opens it as the agent's workspace. The path must be absolute or begin with `~/`. Change it in General settings to choose a different folder.
+
 ## Projects Online By Default
 
 - Description: Whether or not to show the online projects view by default.
@@ -4174,6 +4191,20 @@ Examples:
 
 - Searching for "function" would match "function", "Function", "FUNCTION", etc.
 - Searching for "Function" would only match "Function", not "function" or "FUNCTION"
+
+## Show Bottom Panel Button
+
+- Setting: `show_bottom_panel_button`
+- Default: `true`
+
+Show the terminal panel control in the application header. Terminal keyboard shortcuts remain available when the control is hidden.
+
+## Show in Menu Bar
+
+- Setting: `show_in_menu_bar`
+- Default: `true`
+
+On macOS, keep an application button in the system menu bar. Clicking it focuses or reopens the application. While enabled, closing the last window keeps the application running even when `on_last_window_closed` is `"quit_app"`. Explicitly quitting the application still quits it.
 
 ## Show Call Status Icon
 

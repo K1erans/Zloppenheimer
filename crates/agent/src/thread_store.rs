@@ -16,6 +16,7 @@ pub struct ThreadStore {
 
 impl ThreadStore {
     pub fn init_global(cx: &mut App) {
+        crate::ActivityStore::init_global(cx);
         let thread_store = cx.new(|cx| Self::new(cx));
         cx.set_global(GlobalThreadStore(thread_store));
     }

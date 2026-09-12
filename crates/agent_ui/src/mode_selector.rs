@@ -11,7 +11,7 @@ use ui::{
     prelude::*,
 };
 
-use crate::{CycleModeSelector, ToggleProfileSelector, ui::documentation_aside_side};
+use crate::{CycleModeSelector, ToggleProfileSelector};
 
 pub struct ModeSelector {
     connection: Rc<dyn AgentSessionModes>,
@@ -90,11 +90,11 @@ impl ModeSelector {
     ) -> Entity<ContextMenu> {
         let weak_self = cx.weak_entity();
 
-        ContextMenu::build(window, cx, move |mut menu, _window, cx| {
+        ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
             let all_modes = self.connection.all_modes();
             let current_mode = self.connection.current_mode();
 
-            let side = documentation_aside_side(cx);
+            menu = menu.dropdown_style(px(400.)).header("Permissions");
 
             for mode in all_modes {
                 let is_selected = &mode.id == &current_mode;
@@ -102,11 +102,7 @@ impl ModeSelector {
                     .toggleable(IconPosition::End, is_selected);
 
                 let entry = if let Some(description) = &mode.description {
-                    entry.documentation_aside(side, {
-                        let description = description.clone();
-
-                        move |_| Label::new(description.clone()).into_any_element()
-                    })
+                    entry.description(description.clone())
                 } else {
                     entry
                 };

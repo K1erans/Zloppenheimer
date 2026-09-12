@@ -1,6 +1,10 @@
 use super::*;
 
 impl Editor {
+    pub fn set_gutter_dimensions_override(&mut self, dimensions: Option<GutterDimensions>) {
+        self.gutter_dimensions_override = dimensions;
+    }
+
     pub fn style(&mut self, cx: &App) -> &EditorStyle {
         match self.style {
             Some(ref style) => style,

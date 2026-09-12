@@ -353,6 +353,14 @@ pub trait PickerDelegate: Sized + 'static {
         None
     }
 
+    fn dropdown_style(&self) -> bool {
+        false
+    }
+
+    fn project_switcher_style(&self) -> bool {
+        false
+    }
+
     /// Overrides the search bar entirely. Most delegates should return `None`
     /// to get the picker-rendered default (which includes
     /// [`Self::searchbar_trailer`] and the multi-select toggle); override for
@@ -1535,6 +1543,7 @@ impl<D: PickerDelegate> Picker<D> {
             .with_sizing_behavior(sizing_behavior)
             .flex_grow_1()
             .py_1()
+            .when(self.delegate.dropdown_style(), |this| this.py_0())
             .track_scroll(&scroll_handle)
             .into_any_element(),
             ElementContainer::List(state) => list(
@@ -1546,6 +1555,7 @@ impl<D: PickerDelegate> Picker<D> {
             .with_sizing_behavior(sizing_behavior)
             .flex_grow_1()
             .py(DynamicSpacing::Base04.rems(cx))
+            .when(self.delegate.dropdown_style(), |this| this.py_0())
             .into_any_element(),
         }
     }

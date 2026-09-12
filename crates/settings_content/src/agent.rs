@@ -240,6 +240,10 @@ pub struct AgentSettingsContent {
     /// Favorite models to show at the top of the model selector.
     #[serde(default)]
     pub favorite_models: Vec<LanguageModelSelection>,
+    #[serde(default)]
+    pub hidden_models: Vec<LanguageModelSelection>,
+    #[serde(default)]
+    pub disabled_servers: Vec<String>,
     /// Model to use for the inline assistant. Defaults to default_model when not specified.
     pub inline_assistant_model: Option<LanguageModelSelection>,
     /// Model to use for the inline assistant when streaming tools are enabled.
@@ -364,6 +368,20 @@ pub struct AgentSettingsContent {
 }
 
 impl AgentSettingsContent {
+    pub fn set_full_access(&mut self, full_access: bool) {
+        self.tool_permissions.get_or_insert_default().default = Some(if full_access {
+            ToolPermissionMode::Allow
+        } else {
+            ToolPermissionMode::Confirm
+        });
+        let sandbox_permissions = self.sandbox_permissions.get_or_insert_default();
+        sandbox_permissions.allow_unsandboxed = Some(full_access);
+        if !full_access {
+            sandbox_permissions.allow_all_hosts = Some(false);
+            sandbox_permissions.allow_fs_write_all = Some(false);
+        }
+    }
+
     pub fn set_dock(&mut self, dock: DockPosition) {
         self.dock = Some(dock);
     }
@@ -743,6 +761,7 @@ pub enum CustomAgentServerSettings {
     Custom {
         #[serde(rename = "command")]
         path: PathBuf,
+        working_directory: Option<PathBuf>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         args: Vec<String>,
         /// Default: {}
@@ -1052,6 +1071,62 @@ impl std::fmt::Display for ToolPermissionMode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn permission_presets_preserve_explicit_rules_and_scoped_grants() {
+        let mut settings: super::AgentSettingsContent = serde_json::from_value(serde_json::json!({
+            "tool_permissions": {"tools": {"edit_file": {"always_deny": [{"pattern": "secrets"}]}}},
+            "sandbox_permissions": {"network_hosts": ["example.com"], "allow_all_hosts": true, "allow_fs_write_all": true}
+        })).expect("valid permission settings");
+        let rules = settings
+            .tool_permissions
+            .as_ref()
+            .expect("tool permissions")
+            .tools
+            .clone();
+        settings.set_full_access(true);
+        assert_eq!(
+            settings
+                .tool_permissions
+                .as_ref()
+                .and_then(|permissions| permissions.default),
+            Some(super::ToolPermissionMode::Allow)
+        );
+        assert_eq!(
+            settings
+                .sandbox_permissions
+                .as_ref()
+                .and_then(|permissions| permissions.allow_unsandboxed),
+            Some(true)
+        );
+        settings.set_full_access(false);
+        assert_eq!(
+            settings
+                .tool_permissions
+                .as_ref()
+                .and_then(|permissions| permissions.default),
+            Some(super::ToolPermissionMode::Confirm)
+        );
+        let sandbox = settings
+            .sandbox_permissions
+            .as_ref()
+            .expect("sandbox permissions");
+        assert_eq!(sandbox.allow_unsandboxed, Some(false));
+        assert_eq!(sandbox.allow_all_hosts, Some(false));
+        assert_eq!(sandbox.allow_fs_write_all, Some(false));
+        assert_eq!(
+            settings.sandbox_network_hosts(),
+            &["example.com".to_string()]
+        );
+        assert_eq!(
+            settings
+                .tool_permissions
+                .as_ref()
+                .expect("tool permissions")
+                .tools,
+            rules
+        );
+    }
+
     use super::*;
 
     #[test]

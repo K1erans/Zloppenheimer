@@ -458,6 +458,16 @@ impl ThreadsDatabase {
         "})?()
         .map_err(|e| e.context("Failed to create threads table"))?;
 
+        connection.exec(
+            "CREATE TABLE IF NOT EXISTS agent_activity (
+            day TEXT NOT NULL,
+            session TEXT NOT NULL,
+            tokens INTEGER NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            PRIMARY KEY (day, session)
+        )",
+        )?()?;
+
         if let Ok(mut s) = connection.exec(indoc! {"
             ALTER TABLE threads ADD COLUMN parent_id TEXT
         "})
@@ -567,6 +577,39 @@ impl ThreadsDatabase {
         ))?;
 
         Ok(())
+    }
+
+    pub(crate) fn load_activity(&self) -> Task<Result<Vec<crate::ActivityRecord>>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            let rows = connection.select_bound::<(), (String, String, i64, i64)>(
+                "SELECT day, session, tokens, duration_ms FROM agent_activity ORDER BY day",
+            )?(())?;
+            rows.into_iter()
+                .map(|(day, session, tokens, duration_ms)| {
+                    Ok(crate::ActivityRecord {
+                        day: chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d")?,
+                        session,
+                        tokens: u64::try_from(tokens)?,
+                        duration_ms: u64::try_from(duration_ms)?,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    pub(crate) fn record_activity(&self, record: crate::ActivityRecord) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            connection.exec_bound::<(String, String, i64, i64)>(
+                "INSERT INTO agent_activity(day, session, tokens, duration_ms) VALUES (?, ?, ?, ?)
+                ON CONFLICT(day, session) DO UPDATE SET
+                tokens = tokens + excluded.tokens, duration_ms = duration_ms + excluded.duration_ms",
+            )?((record.day.to_string(), record.session, i64::try_from(record.tokens)?, i64::try_from(record.duration_ms)?))?;
+            Ok(())
+        })
     }
 
     pub fn list_threads(&self) -> Task<Result<Vec<DbThreadMetadata>>> {

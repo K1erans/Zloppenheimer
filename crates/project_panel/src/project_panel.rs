@@ -638,7 +638,7 @@ fn get_item_color(is_sticky: bool, cx: &App) -> ItemColors {
         } else {
             colors.element_hover
         },
-        marked: colors.element_selected,
+        marked: gpui::rgb(0x373342).into(),
         focused: colors.panel_focused_border,
         drag_over: colors.drop_target_background,
     }
@@ -2999,16 +2999,20 @@ impl ProjectPanel {
         cx: &mut Context<Self>,
     ) {
         if let Some((_, _, index)) = self.selection.and_then(|s| self.index_for_selection(s)) {
-            self.scroll_handle
-                .scroll_to_item_strict(index, ScrollStrategy::Center);
+            self.scroll_handle.scroll_to_item_strict(
+                index.saturating_sub(self.list_entry_offset()),
+                ScrollStrategy::Center,
+            );
             cx.notify();
         }
     }
 
     fn scroll_cursor_top(&mut self, _: &ScrollCursorTop, _: &mut Window, cx: &mut Context<Self>) {
         if let Some((_, _, index)) = self.selection.and_then(|s| self.index_for_selection(s)) {
-            self.scroll_handle
-                .scroll_to_item_strict(index, ScrollStrategy::Top);
+            self.scroll_handle.scroll_to_item_strict(
+                index.saturating_sub(self.list_entry_offset()),
+                ScrollStrategy::Top,
+            );
             cx.notify();
         }
     }
@@ -3020,8 +3024,10 @@ impl ProjectPanel {
         cx: &mut Context<Self>,
     ) {
         if let Some((_, _, index)) = self.selection.and_then(|s| self.index_for_selection(s)) {
-            self.scroll_handle
-                .scroll_to_item_strict(index, ScrollStrategy::Bottom);
+            self.scroll_handle.scroll_to_item_strict(
+                index.saturating_sub(self.list_entry_offset()),
+                ScrollStrategy::Bottom,
+            );
             cx.notify();
         }
     }
@@ -3355,7 +3361,7 @@ impl ProjectPanel {
     fn autoscroll(&mut self, cx: &mut Context<Self>) {
         if let Some((_, _, index)) = self.selection.and_then(|s| self.index_for_selection(s)) {
             self.scroll_handle.scroll_to_item_with_offset(
-                index,
+                index.saturating_sub(self.list_entry_offset()),
                 ScrollStrategy::Center,
                 self.sticky_items_count,
             );
@@ -5174,6 +5180,18 @@ impl ProjectPanel {
         }
     }
 
+    fn list_entry_offset(&self) -> usize {
+        usize::from(
+            self.state.visible_entries.len() == 1
+                && self
+                    .state
+                    .visible_entries
+                    .first()
+                    .and_then(|worktree| worktree.entries.first())
+                    .is_some_and(|entry| entry.path.is_empty()),
+        )
+    }
+
     fn index_for_entry(
         &self,
         entry_id: ProjectEntryId,
@@ -5771,6 +5789,16 @@ impl ProjectPanel {
             .is_some_and(|selection| selection.entry_id == entry_id);
 
         let file_name = details.filename.clone();
+        let icon_color = Color::Custom(
+            gpui::rgb(if kind.is_file() && file_name.ends_with(".rs") {
+                0xDCAD86
+            } else if kind.is_file() && file_name.ends_with(".md") {
+                0x9AC5DA
+            } else {
+                0xBDC3DA
+            })
+            .into(),
+        );
 
         let chevron = details.chevron.clone();
         let mut icon = details.icon.clone();
@@ -5781,7 +5809,13 @@ impl ProjectPanel {
             }
         }
 
-        let filename_text_color = details.filename_text_color;
+        let filename_text_color = if details.path.is_empty() {
+            Color::Custom(gpui::rgb(0xDEC08B).into())
+        } else if details.git_status == git::status::GitSummary::UNCHANGED && !details.is_ignored {
+            Color::Custom(gpui::rgb(0xBBC2DF).into())
+        } else {
+            details.filename_text_color
+        };
         let diagnostic_severity = details.diagnostic_severity;
         let diagnostic_mark = details.diagnostic_mark;
         let reserves_chevron_slot = details.reserves_chevron_slot;
@@ -5793,15 +5827,16 @@ impl ProjectPanel {
         let path = details.path.clone();
 
         let depth = details.depth;
+        let is_root = details.path.is_empty();
         let worktree_id = details.worktree_id;
 
-        let bg_color = if is_marked {
+        let bg_color = if is_marked || is_active {
             item_colors.marked
         } else {
             item_colors.default
         };
 
-        let bg_hover_color = if is_marked {
+        let bg_hover_color = if is_marked || is_active {
             item_colors.marked
         } else {
             item_colors.hover
@@ -5895,6 +5930,7 @@ impl ProjectPanel {
 
         div()
             .id(id.clone())
+            .flex_none()
             .relative()
             .group(GROUP_NAME)
             .when_some(
@@ -5916,8 +5952,6 @@ impl ProjectPanel {
             .cursor_pointer()
             .rounded_none()
             .bg(bg_color)
-            .border_1()
-            .border_r_2()
             .border_color(border_color)
             .hover(|style| style.bg(bg_hover_color).border_color(border_hover_color))
             .when(is_sticky, |this| this.block_mouse_except_scroll())
@@ -6218,7 +6252,7 @@ impl ProjectPanel {
                             project_panel
                                 .scroll_handle
                                 .scroll_to_item_strict_with_offset(
-                                    index,
+                                    index.saturating_sub(project_panel.list_entry_offset()),
                                     ScrollStrategy::Top,
                                     sticky_index.unwrap_or(0),
                                 );
@@ -6262,15 +6296,22 @@ impl ProjectPanel {
             )
             .child(
                 ListItem::new(id)
-                    .indent_level(depth)
+                    .indent_level(depth.saturating_sub(1))
                     .indent_step_size(px(settings.indent_size))
-                    .spacing(match settings.entry_spacing {
-                        ProjectPanelEntrySpacing::Comfortable => ListItemSpacing::Dense,
-                        ProjectPanelEntrySpacing::Standard => ListItemSpacing::ExtraDense,
-                    })
+                    .height(px(if is_root && self.list_entry_offset() == 1 {
+                        32.
+                    } else {
+                        match settings.entry_spacing {
+                            ProjectPanelEntrySpacing::Comfortable => 32.,
+                            ProjectPanelEntrySpacing::Standard => 27.,
+                        }
+                    }))
+                    .horizontal_padding(px(if is_root { 8. } else { 18. }))
+                    .spacing(ListItemSpacing::Dense)
                     .selectable(false)
                     .when(
-                        canonical_path.is_some()
+                        is_root
+                            || canonical_path.is_some()
                             || diagnostic_count.is_some()
                             || git_indicator.is_some(),
                         |this| {
@@ -6295,7 +6336,81 @@ impl ProjectPanel {
                                 h_flex()
                                     .gap_1()
                                     .flex_none()
-                                    .pr_3()
+                                    .pr(px(if is_root { 0. } else { 4. }))
+                                    .when(is_root, |this| {
+                                        this.children(
+                                            [
+                                                ("new-file", IconName::File, "New File", false),
+                                                (
+                                                    "new-folder",
+                                                    IconName::FolderAdd,
+                                                    "New Folder",
+                                                    true,
+                                                ),
+                                            ]
+                                            .map(
+                                                |(id, icon, tooltip, directory)| {
+                                                    IconButton::new(id, icon)
+                                                        .width(px(24.))
+                                                        .height(px(26.).into())
+                                                        .corner_radius(px(4.))
+                                                        .icon_size(IconSize::Custom(rems_from_px(
+                                                            16_f32,
+                                                        )))
+                                                        .icon_color(Color::Custom(
+                                                            gpui::rgb(0xDCE0E5).into(),
+                                                        ))
+                                                        .disabled(
+                                                            self.project.read(cx).is_read_only(cx),
+                                                        )
+                                                        .tooltip(Tooltip::text(ui::localized(
+                                                            tooltip, cx,
+                                                        )))
+                                                        .on_click(cx.listener(
+                                                            move |this, _, window, cx| {
+                                                                cx.stop_propagation();
+                                                                this.selection = Some(selection);
+                                                                if directory {
+                                                                    this.new_directory(
+                                                                        &NewDirectory,
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                } else {
+                                                                    this.new_file(
+                                                                        &NewFile, window, cx,
+                                                                    );
+                                                                }
+                                                            },
+                                                        ))
+                                                },
+                                            ),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "open-project-folder",
+                                                IconName::FolderOpen,
+                                            )
+                                            .width(px(24.))
+                                            .height(px(26.).into())
+                                            .corner_radius(px(4.))
+                                            .icon_size(IconSize::Custom(rems_from_px(16_f32)))
+                                            .icon_color(Color::Custom(gpui::rgb(0xDCE0E5).into()))
+                                            .tooltip(Tooltip::text(ui::localized(
+                                                "Open Folder",
+                                                cx,
+                                            )))
+                                            .on_click(
+                                                |_, window, cx| {
+                                                    cx.stop_propagation();
+                                                    window.dispatch_action(
+                                                        workspace::Open::DEFAULT.boxed_clone(),
+                                                        cx,
+                                                    );
+                                                },
+                                            ),
+                                        )
+                                    })
                                     .when_some(diagnostic_count, |this, count| {
                                         this.when(count.error_count > 0, |this| {
                                             this.child(
@@ -6362,8 +6477,11 @@ impl ProjectPanel {
                                 Some((DiagnosticMark::OnIcon(decoration_kind), color)) => {
                                     div().child(decorated(icon.clone(), decoration_kind, color))
                                 }
-                                _ => h_flex()
-                                    .child(Icon::from_path(icon.to_string()).color(Color::Muted)),
+                                _ => h_flex().child(
+                                    Icon::from_path(icon.to_string())
+                                        .size(IconSize::Custom(rems_from_px(16_f32)))
+                                        .color(icon_color),
+                                ),
                             })
                         } else if let Some(DiagnosticMark::Standalone(icon_name)) = diagnostic_mark
                         {
@@ -6393,25 +6511,26 @@ impl ProjectPanel {
                                     decorated(chevron, decoration_kind, color)
                                 }
                                 _ => Icon::from_path(chevron)
-                                    .color(Color::Muted)
+                                    .size(IconSize::Custom(rems_from_px(16_f32)))
+                                    .color(Color::Custom(gpui::rgb(0x939AAE).into()))
                                     .into_any_element(),
                             });
 
                         match (chevron, icon_slot) {
-                            (Some(chevron), Some(icon_slot)) => {
-                                this.child(h_flex().gap_0p5().child(chevron).child(icon_slot))
-                            }
+                            (Some(chevron), Some(icon_slot)) => this.child(
+                                h_flex()
+                                    .w(px(36.))
+                                    .flex_none()
+                                    .child(div().w(px(16.)).flex_none().child(chevron))
+                                    .child(div().w(px(20.)).flex_none().child(icon_slot)),
+                            ),
                             (Some(chevron), None) => this.child(h_flex().child(chevron)),
                             (None, Some(icon_slot)) if reserves_chevron_slot => this.child(
                                 h_flex()
-                                    .gap_0p5()
-                                    .child(
-                                        h_flex()
-                                            .size(IconSize::default().rems())
-                                            .invisible()
-                                            .flex_none(),
-                                    )
-                                    .child(icon_slot),
+                                    .w(px(36.))
+                                    .flex_none()
+                                    .child(div().w(px(16.)).flex_none())
+                                    .child(div().w(px(20.)).flex_none().child(icon_slot)),
                             ),
                             (None, Some(icon_slot)) => this.child(icon_slot),
                             (None, None) => this,
@@ -6443,6 +6562,7 @@ impl ProjectPanel {
 
                                 None => this.child(
                                     Label::new(file_name)
+                                        .size(LabelSize::Custom(rems(12. / 16.)))
                                         .single_line()
                                         .color(filename_text_color)
                                         .when(
@@ -6609,6 +6729,7 @@ impl ProjectPanel {
                         )
                         .child(
                             Label::new(component)
+                                .size(LabelSize::Custom(rems(12. / 16.)))
                                 .single_line()
                                 .color(filename_text_color)
                                 .when(bold_folder_labels && !is_file, |this| {
@@ -6948,7 +7069,7 @@ impl ProjectPanel {
                 child_count += 1;
             }
 
-            let start = ix + 1;
+            let start = (ix + 1).saturating_sub(self.list_entry_offset());
             let end = start + child_count;
 
             let visible_worktree = &self.state.visible_entries[worktree_ix];
@@ -6989,7 +7110,9 @@ impl ProjectPanel {
     ) -> SmallVec<[AnyElement; 8]> {
         let project = self.project.read(cx);
 
-        let Some((worktree_id, entry_ref)) = self.entry_at_index(child.index) else {
+        let Some((worktree_id, entry_ref)) =
+            self.entry_at_index(child.index + self.list_entry_offset())
+        else {
             return SmallVec::new();
         };
 
@@ -7029,6 +7152,9 @@ impl ProjectPanel {
             break 'outer;
         }
 
+        if self.list_entry_offset() == 1 {
+            sticky_parents.retain(|entry| !entry.path.is_empty());
+        }
         if sticky_parents.is_empty() {
             return SmallVec::new();
         }
@@ -7127,7 +7253,7 @@ impl Render for ProjectPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_worktree = !self.state.visible_entries.is_empty();
         let project = self.project.read(cx);
-        let panel_settings = ProjectPanelSettings::get_global(cx);
+        let panel_settings = *ProjectPanelSettings::get_global(cx);
         let indent_size = panel_settings.indent_size;
         let show_indent_guides = panel_settings.indent_guides.show == ShowIndentGuides::Always;
         let horizontal_scroll = panel_settings.scrollbar.horizontal_scroll;
@@ -7151,14 +7277,28 @@ impl Render for ProjectPanel {
         // version that understands these messages.
         let is_collab = project.is_via_collab();
         let is_local = project.is_local();
+        let is_read_only = project.is_read_only(cx);
+        let can_open_system = is_local || project.is_via_wsl_with_host_interop(cx);
+        let is_remote_server = project.is_via_remote_server();
 
         if has_worktree {
+            let list_entry_offset = self.list_entry_offset();
             let item_count = self
                 .state
                 .visible_entries
                 .iter()
                 .map(|worktree| worktree.entries.len())
-                .sum();
+                .sum::<usize>()
+                - list_entry_offset;
+            let mut root_header = None;
+            if list_entry_offset == 1 {
+                let marked_selections: Arc<[SelectedEntry]> =
+                    Arc::from(self.marked_entries.clone());
+                self.for_each_visible_entry(0..1, window, cx, &mut |id, details, window, cx| {
+                    root_header =
+                        Some(self.render_entry(id, details, marked_selections.clone(), window, cx));
+                });
+            }
 
             fn handle_drag_move<T: 'static>(
                 this: &mut ProjectPanel,
@@ -7229,6 +7369,8 @@ impl Render for ProjectPanel {
             }
             h_flex()
                 .id("project-panel")
+                .pt(px(6.))
+                .bg(gpui::rgb(0x242631))
                 .group("project-panel")
                 .when(panel_settings.drag_and_drop, |this| {
                     this.on_drag_move(cx.listener(handle_drag_move::<ExternalPaths>))
@@ -7284,7 +7426,7 @@ impl Render for ProjectPanel {
                 .on_action(cx.listener(Self::fold_directory))
                 .on_action(cx.listener(Self::remove_from_project))
                 .on_action(cx.listener(Self::compare_marked_files))
-                .when(!project.is_read_only(cx), |el| {
+                .when(!is_read_only, |el| {
                     el.on_action(cx.listener(Self::new_file))
                         .on_action(cx.listener(Self::new_directory))
                         .on_action(cx.listener(Self::rename))
@@ -7302,21 +7444,19 @@ impl Render for ProjectPanel {
                                 .on_action(cx.listener(Self::redo))
                         })
                 })
-                .when(
-                    project.is_local() || project.is_via_wsl_with_host_interop(cx),
-                    |el| {
-                        el.on_action(cx.listener(Self::reveal_in_finder))
-                            .on_action(cx.listener(Self::open_system))
-                            .on_action(cx.listener(Self::open_in_terminal))
-                    },
-                )
-                .when(project.is_via_remote_server(), |el| {
+                .when(can_open_system, |el| {
+                    el.on_action(cx.listener(Self::reveal_in_finder))
+                        .on_action(cx.listener(Self::open_system))
+                        .on_action(cx.listener(Self::open_in_terminal))
+                })
+                .when(is_remote_server, |el| {
                     el.on_action(cx.listener(Self::open_in_terminal))
                         .on_action(cx.listener(Self::download_from_remote))
                 })
                 .track_focus(&self.focus_handle(cx))
                 .child(
                     v_flex()
+                        .children(root_header)
                         .child(
                             uniform_list("entries", item_count, {
                                 cx.processor(|this, range: Range<usize>, window, cx| {
@@ -7324,8 +7464,9 @@ impl Render for ProjectPanel {
                                     let mut items = Vec::with_capacity(this.rendered_entries_len);
                                     let marked_selections: Arc<[SelectedEntry]> =
                                         Arc::from(this.marked_entries.clone());
+                                    let offset = this.list_entry_offset();
                                     this.for_each_visible_entry(
-                                        range,
+                                        range.start + offset..range.end + offset,
                                         window,
                                         cx,
                                         &mut |id, details, window, cx| {
@@ -7352,8 +7493,9 @@ impl Render for ProjectPanel {
                                         |this, range, window, cx| {
                                             let mut items =
                                                 SmallVec::with_capacity(range.end - range.start);
+                                            let offset = this.list_entry_offset();
                                             this.iter_visible_entries(
-                                                range,
+                                                range.start + offset..range.end + offset,
                                                 window,
                                                 cx,
                                                 &mut |entry, _, entries, _, _| {
@@ -7375,8 +7517,10 @@ impl Render for ProjectPanel {
                                             if window.modifiers().secondary() {
                                                 let ix = active_indent_guide.offset.y;
                                                 let Some((target_entry, worktree)) = maybe!({
-                                                    let (worktree_id, entry) =
-                                                        this.entry_at_index(ix)?;
+                                                    let (worktree_id, entry) = this
+                                                        .entry_at_index(
+                                                            ix + this.list_entry_offset(),
+                                                        )?;
                                                     let worktree = this
                                                         .project
                                                         .read(cx)
@@ -7466,8 +7610,9 @@ impl Render for ProjectPanel {
                                     |this, range, window, cx| {
                                         let mut items =
                                             SmallVec::with_capacity(range.end - range.start);
+                                        let offset = this.list_entry_offset();
                                         this.iter_visible_entries(
-                                            range,
+                                            range.start + offset..range.end + offset,
                                             window,
                                             cx,
                                             &mut |entry, index, entries, _, _| {
@@ -7475,8 +7620,10 @@ impl Render for ProjectPanel {
                                                     Self::calculate_depth_and_difference(
                                                         entry, entries,
                                                     );
-                                                let candidate =
-                                                    StickyProjectPanelCandidate { index, depth };
+                                                let candidate = StickyProjectPanelCandidate {
+                                                    index: index - offset,
+                                                    depth,
+                                                };
                                                 items.push(candidate);
                                             },
                                         );
@@ -7541,7 +7688,11 @@ impl Render for ProjectPanel {
                                 ListHorizontalSizingBehavior::FitList
                             })
                             .when(horizontal_scroll, |list| {
-                                list.with_width_from_item(self.state.max_width_item_index)
+                                list.with_width_from_item(
+                                    self.state
+                                        .max_width_item_index
+                                        .map(|index| index.saturating_sub(list_entry_offset)),
+                                )
                             })
                             .track_scroll(&self.scroll_handle),
                         )
@@ -7677,7 +7828,7 @@ impl Render for ProjectPanel {
                                         }
                                     }),
                                 )
-                                .when(!project.is_read_only(cx), |el| {
+                                .when(!is_read_only, |el| {
                                     el.on_click(cx.listener(
                                         |this, event: &gpui::ClickEvent, window, cx| {
                                             if event.click_count() > 1

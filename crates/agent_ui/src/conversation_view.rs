@@ -6,7 +6,7 @@ use acp_thread::{
     ToolCallContent, ToolCallStatus,
 };
 use acp_thread::{AgentConnection, Plan};
-use action_log::{ActionLog, ActionLogTelemetry, DiffStats};
+use action_log::{ActionLogTelemetry, DiffStats};
 use agent::{NativeAgentServer, NoModelConfiguredError, ThreadStore};
 use agent_client_protocol::schema::v1 as acp;
 #[cfg(test)]
@@ -16,7 +16,6 @@ use agent_settings::{AgentProfileId, AgentSettings};
 use anyhow::{Result, anyhow};
 #[cfg(feature = "audio")]
 use audio::{Audio, Sound};
-use buffer_diff::BufferDiff;
 use client::zed_urls;
 use collections::{HashMap, HashSet, IndexMap};
 use editor::scroll::Autoscroll;
@@ -55,7 +54,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{rc::Rc, time::Duration};
 use terminal_view::terminal_panel::TerminalPanel;
-use text::Anchor;
 use theme_settings::{AgentBufferFontSize, AgentUiFontSize};
 use ui::{
     Callout, CircularProgress, CommonAnimationExt, ContextMenu, ContextMenuEntry, CopyButton,
@@ -1607,7 +1605,7 @@ impl ConversationView {
             AcpThreadEvent::StatusChanged => {
                 if let Some(active) = self.thread_view(&session_id) {
                     active.update(cx, |active, cx| {
-                        active.sync_generating_indicator(cx);
+                        active.sync_status_indicator(cx);
                     });
                 }
             }
@@ -1629,7 +1627,7 @@ impl ConversationView {
                     active.update(cx, |active, cx| {
                         active.sync_elicitation_state_for_entry(index, window, cx);
                         active.sync_editor_mode(cx);
-                        active.sync_generating_indicator(cx);
+                        active.sync_status_indicator(cx);
                     });
                 }
             }
@@ -1644,7 +1642,7 @@ impl ConversationView {
                     active.update(cx, |active, cx| {
                         active.sync_elicitation_state_for_entry(*index, window, cx);
                         active.auto_expand_streaming_thought(cx);
-                        active.sync_generating_indicator(cx);
+                        active.sync_status_indicator(cx);
                     });
                 }
             }
@@ -1672,8 +1670,9 @@ impl ConversationView {
             AcpThreadEvent::ElicitationResponded(_) => {}
             AcpThreadEvent::Retry(retry) => {
                 if let Some(active) = self.thread_view(&session_id) {
-                    active.update(cx, |active, _cx| {
+                    active.update(cx, |active, cx| {
                         active.thread_retry_status = Some(retry.clone());
+                        active.sync_status_indicator(cx);
                     });
                 }
             }
@@ -1684,12 +1683,13 @@ impl ConversationView {
                     active.update(cx, |active, cx| {
                         if !is_generating {
                             active.thread_retry_status.take();
+                            active.response_cancelled = *stop_reason == acp::StopReason::Cancelled;
                             active.clear_auto_expand_tracking(cx);
                             if active.list_state.is_following_tail() {
                                 active.list_state.scroll_to_end();
                             }
                         }
-                        active.sync_generating_indicator(cx);
+                        active.sync_status_indicator(cx);
                     });
                 }
                 if is_subagent {
@@ -1765,7 +1765,7 @@ impl ConversationView {
                                 active.list_state.scroll_to_end();
                             }
                         }
-                        active.sync_generating_indicator(cx);
+                        active.sync_status_indicator(cx);
                     });
                 }
                 if !is_subagent {
@@ -1843,24 +1843,20 @@ impl ConversationView {
                             native_available_skills(&native_connection, &session_id, cx)
                         })
                         .unwrap_or_default();
-                    let has_slash_completions =
-                        !available_commands.is_empty() || !available_skills.is_empty();
-
-                    let agent_display_name = self
-                        .agent_server_store
-                        .read(cx)
-                        .agent_display_name(&self.agent.agent_id())
-                        .unwrap_or_else(|| self.agent.agent_id().0.to_string().into());
-
-                    let new_placeholder =
-                        placeholder_text(agent_display_name.as_ref(), has_slash_completions);
-
                     thread_view.update(cx, |thread_view, cx| {
                         let mut session_capabilities = thread_view.session_capabilities.write();
                         session_capabilities.set_available_commands(available_commands.clone());
                         session_capabilities.set_available_skills(available_skills);
                         thread_view.message_editor.update(cx, |editor, cx| {
-                            editor.set_placeholder_text(&new_placeholder, window, cx);
+                            editor.set_placeholder_text(
+                                if thread_view.thread.read(cx).entries().is_empty() {
+                                    MESSAGE_EDITOR_PLACEHOLDER
+                                } else {
+                                    "Ask a follow-up…"
+                                },
+                                window,
+                                cx,
+                            );
                         });
                     });
                 }
@@ -3331,21 +3327,7 @@ fn native_available_skills(
         .collect()
 }
 
-fn placeholder_text(agent_name: &str, has_commands: bool) -> String {
-    if agent_name == agent::ZED_AGENT_ID.as_ref() {
-        format!(
-            "Message the {}, @ to include context, / for commands",
-            agent_name
-        )
-    } else if has_commands {
-        format!(
-            "Message {} — @ to include context, / for commands",
-            agent_name
-        )
-    } else {
-        format!("Message {} — @ to include context", agent_name)
-    }
-}
+const MESSAGE_EDITOR_PLACEHOLDER: &str = "Ask for changes, or describe an idea…";
 
 impl Focusable for ConversationView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -4547,7 +4529,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             placeholder,
-            Some("Message Test — @ to include context, / for commands".to_string())
+            Some("Ask for changes, or describe an idea…".to_string())
         );
 
         message_editor.update_in(cx, |editor, window, cx| {
@@ -5301,6 +5283,11 @@ pub(crate) mod tests {
 
         let cx = &mut VisualTestContext::from_window(multi_workspace_handle.into(), cx);
         register_test_sidebar(true, cx);
+        multi_workspace_handle
+            .update(cx, |workspace, window, cx| {
+                workspace.close_sidebar(window, cx);
+            })
+            .expect("test workspace should be open");
 
         let thread_store = cx.update(|_window, cx| cx.new(|cx| ThreadStore::new(cx)));
         let connection_store =
@@ -6661,7 +6648,7 @@ pub(crate) mod tests {
     fn assert_thread_list_item_count_matches_entries(view: &ThreadView, cx: &App) {
         assert_eq!(
             view.list_state.item_count(),
-            view.thread.read(cx).entries().len() + usize::from(view.generating_indicator_in_list)
+            view.thread.read(cx).entries().len() + usize::from(view.status_indicator_in_list)
         );
     }
 
@@ -8556,6 +8543,23 @@ pub(crate) mod tests {
         setup.thread.read_with(cx, |thread, _cx| {
             assert_eq!(thread.status(), ThreadStatus::Idle);
         });
+        let active = active_thread(&setup.conversation_view, cx);
+        active.read_with(cx, |view, cx| {
+            assert!(view.response_cancelled);
+            assert!(view.status_indicator_in_list);
+            assert_thread_list_item_count_matches_entries(view, cx);
+        });
+        setup.message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("Continue with a new prompt", window, cx);
+        });
+        active.update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+        active.update(cx, |view, cx| {
+            assert!(!view.response_cancelled);
+            assert_thread_list_item_count_matches_entries(view, cx);
+            view.cancel_generation(cx);
+        });
+        cx.run_until_parked();
     }
 
     #[gpui::test]
@@ -10008,6 +10012,41 @@ pub(crate) mod tests {
                 "Expected ThreadError::MaxOutputTokens, got: {:?}",
                 error.is_some()
             );
+            let state = state.read(cx);
+            assert!(state.status_indicator_in_list);
+            assert_thread_list_item_count_matches_entries(state, cx);
+        });
+
+        let active = active_thread(&conversation_view, cx);
+        active.update(cx, |view, cx| {
+            view.clear_thread_error(cx);
+            assert!(!view.status_indicator_in_list);
+            assert_thread_list_item_count_matches_entries(view, cx);
+
+            view.thread_retry_status = Some(acp_thread::RetryStatus {
+                last_error: "Provider temporarily unavailable".into(),
+                attempt: 1,
+                max_attempts: 3,
+                started_at: Instant::now(),
+                duration: Duration::from_secs(5),
+                meta: None,
+            });
+            view.sync_status_indicator(cx);
+            assert!(view.status_indicator_in_list);
+            assert_thread_list_item_count_matches_entries(view, cx);
+            view.sync_status_indicator(cx);
+            assert_thread_list_item_count_matches_entries(view, cx);
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1144.), px(816.)), |_, _| {
+            active.clone().into_any_element()
+        });
+        active.update(cx, |view, cx| view.cancel_generation(cx));
+        cx.run_until_parked();
+        active.read_with(cx, |view, cx| {
+            assert!(view.thread_error.is_none());
+            assert!(view.thread_retry_status.is_none());
+            assert!(!view.status_indicator_in_list);
+            assert_thread_list_item_count_matches_entries(view, cx);
         });
     }
 

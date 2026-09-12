@@ -1013,6 +1013,7 @@ pub struct Editor {
     mode: EditorMode,
     breadcrumbs_visibility: BreadcrumbsVisibility,
     show_gutter: bool,
+    gutter_dimensions_override: Option<GutterDimensions>,
     show_scrollbars: ScrollbarAxes,
     minimap_visibility: MinimapVisibility,
     offset_content: bool,
@@ -1256,6 +1257,7 @@ impl NextScrollCursorCenterTopBottom {
 pub struct EditorSnapshot {
     pub mode: EditorMode,
     show_gutter: bool,
+    gutter_dimensions_override: Option<GutterDimensions>,
     offset_content: bool,
     sticky_line_number_digits: usize,
     show_line_numbers: Option<bool>,
@@ -2375,6 +2377,7 @@ impl Editor {
             offset_content: !matches!(mode, EditorMode::SingleLine),
             breadcrumbs_visibility: BreadcrumbsVisibility::from_settings(cx),
             show_gutter: full_mode,
+            gutter_dimensions_override: None,
             search_results_hold: None,
             show_line_numbers: (!full_mode).then_some(false),
             use_relative_line_numbers: None,
@@ -3119,6 +3122,7 @@ impl Editor {
         EditorSnapshot {
             mode: self.mode.clone(),
             show_gutter: self.show_gutter,
+            gutter_dimensions_override: self.gutter_dimensions_override,
             offset_content: self.offset_content,
             sticky_line_number_digits: self
                 .search_results_hold
@@ -12118,6 +12122,11 @@ impl EditorSnapshot {
         cx: &App,
     ) -> GutterDimensions {
         if self.show_gutter
+            && let Some(dimensions) = self.gutter_dimensions_override
+        {
+            return dimensions;
+        }
+        if self.show_gutter
             && let Some(ch_width) = cx.text_system().ch_width(font_id, font_size).log_err()
             && let Some(ch_advance) = cx.text_system().ch_advance(font_id, font_size).log_err()
         {
@@ -12163,6 +12172,17 @@ impl EditorSnapshot {
                     });
 
             let is_singleton = self.buffer_snapshot().is_singleton();
+
+            if is_singleton && show_line_numbers && git_blame_entries_width.is_none() {
+                let line_number_width = line_gutter_width.max(px(30.));
+                return GutterDimensions {
+                    left_padding: px(6.),
+                    right_padding: px(14.),
+                    width: px(20.) + line_number_width,
+                    margin: px(18.),
+                    git_blame_entries_width,
+                };
+            }
 
             let left_padding = git_blame_entries_width.unwrap_or(Pixels::ZERO)
                 + if !is_singleton {
@@ -12409,7 +12429,20 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        EditorElement::new(&cx.entity(), self.create_style(cx))
+        let element = EditorElement::new(&cx.entity(), self.create_style(cx));
+        if matches!(self.mode, EditorMode::Full { .. })
+            && self.project.is_some()
+            && self.buffer.read(cx).is_singleton()
+        {
+            div()
+                .size_full()
+                .pt(px(15.))
+                .bg(cx.theme().colors().editor_background)
+                .child(element)
+                .into_any_element()
+        } else {
+            element.into_any_element()
+        }
     }
 }
 

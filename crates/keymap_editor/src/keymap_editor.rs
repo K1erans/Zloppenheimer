@@ -429,7 +429,11 @@ impl ConflictState {
     }
 }
 
-struct KeymapEditor {
+pub struct KeymapEditor {
+    embedded: bool,
+    embedded_modal: Option<Entity<KeybindingEditorModal>>,
+    embedded_scroll: gpui::UniformListScrollHandle,
+    embedded_modal_subscription: Option<Subscription>,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     _keymap_subscription: Subscription,
@@ -538,6 +542,72 @@ fn binding_is_unbound_by_unbind(
 }
 
 impl KeymapEditor {
+    pub fn embedded(
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut editor = Self::new(workspace, window, cx);
+        editor.embedded = true;
+        editor.filter_editor.update(cx, |editor, cx| {
+            editor.set_text_style_refinement(TextStyleRefinement {
+                font_size: Some(rems_from_px(12_f32).into()),
+                line_height: Some(gpui::relative(16. / 12.)),
+                ..Default::default()
+            });
+            editor.set_placeholder_text("Filter action names…", window, cx)
+        });
+        editor
+    }
+
+    fn show_embedded_modal(
+        &mut self,
+        create: bool,
+        binding: ProcessedBinding,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(fs) = self
+            .workspace
+            .read_with(cx, |workspace, _| workspace.app_state().fs.clone())
+            .log_err()
+        else {
+            return;
+        };
+        let workspace = self.workspace.clone();
+        let editor = cx.entity();
+        let temporary_directory = self
+            .action_args_temp_dir
+            .as_ref()
+            .map(|directory| directory.path().to_path_buf());
+        let modal = cx.new(|cx| {
+            KeybindingEditorModal::new(
+                create,
+                binding,
+                index,
+                editor,
+                temporary_directory.as_deref(),
+                workspace,
+                fs,
+                window,
+                cx,
+            )
+        });
+        modal.focus_handle(cx).focus(window, cx);
+        self.embedded_modal_subscription =
+            Some(
+                cx.subscribe_in(&modal, window, |this, _, _: &DismissEvent, window, cx| {
+                    this.embedded_modal = None;
+                    this.embedded_modal_subscription = None;
+                    this.focus_handle.focus(window, cx);
+                    cx.notify();
+                }),
+            );
+        self.embedded_modal = Some(modal);
+        cx.notify();
+    }
+
     fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let _keymap_subscription =
             cx.observe_global_in::<KeymapEventChannel>(window, Self::on_keymap_changed);
@@ -596,6 +666,10 @@ impl KeymapEditor {
         .detach();
 
         let mut this = Self {
+            embedded: false,
+            embedded_modal: None,
+            embedded_scroll: gpui::UniformListScrollHandle::new(),
+            embedded_modal_subscription: None,
             workspace,
             keybindings: vec![],
             keybinding_conflict_state: ConflictState::default(),
@@ -1062,7 +1136,11 @@ impl KeymapEditor {
         if self.selected_index != Some(index) {
             self.selected_index = Some(index);
             if let Some(scroll_strategy) = scroll {
-                self.scroll_to_item(index, scroll_strategy, cx);
+                if self.embedded {
+                    self.embedded_scroll.scroll_to_item(index, scroll_strategy);
+                } else {
+                    self.scroll_to_item(index, scroll_strategy, cx);
+                }
             }
             window.focus(&self.focus_handle, cx);
             cx.notify();
@@ -1321,6 +1399,10 @@ impl KeymapEditor {
             return;
         }
         let keybind = keybind.clone();
+        if self.embedded {
+            self.show_embedded_modal(create, keybind, keybind_index, window, cx);
+            return;
+        }
         let keymap_editor = cx.entity();
 
         let keystroke = keybind.keystroke_text().cloned().unwrap_or_default();
@@ -1395,6 +1477,10 @@ impl KeymapEditor {
 
         let dummy_binding = ProcessedBinding::Unmapped(action_information);
         let dummy_index = self.keybindings.len();
+        if self.embedded {
+            self.show_embedded_modal(true, dummy_binding, dummy_index, window, cx);
+            return;
+        }
 
         let temp_dir = self.action_args_temp_dir.as_ref().map(|dir| dir.path());
 
@@ -1959,7 +2045,10 @@ impl Item for KeymapEditor {
 }
 
 impl Render for KeymapEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut ui::Context<Self>) -> impl ui::IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut ui::Context<Self>) -> impl IntoElement {
+        if self.embedded {
+            return self.render_embedded(window, cx);
+        }
         if let SearchMode::KeyStroke { exact_match } = self.search_mode {
             let button = IconButton::new("keystrokes-exact-match", IconName::CaseSensitive)
                 .tooltip(move |_window, cx| {
@@ -2372,6 +2461,7 @@ impl Render for KeymapEditor {
                 )
                 .with_priority(1)
             }))
+            .into_any_element()
     }
 }
 
@@ -2472,7 +2562,7 @@ struct KeybindingEditorModal {
     selected_action_name: Option<&'static str>,
     fs: Arc<dyn Fs>,
     error: Option<InputError>,
-    keymap_editor: Entity<KeymapEditor>,
+    keymap_editor: WeakEntity<KeymapEditor>,
     workspace: WeakEntity<Workspace>,
     focus_state: KeybindingEditorModalFocusState,
 }
@@ -2627,13 +2717,20 @@ impl KeybindingEditorModal {
             action_name_to_static,
             selected_action_name: None,
             error: None,
-            keymap_editor,
+            keymap_editor: keymap_editor.downgrade(),
             workspace,
             focus_state,
         }
     }
 
     fn add_action_arguments_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(keymap_editor) = self.keymap_editor.upgrade() else {
+            self.set_error(
+                InputError::error(anyhow!("The keymap editor has closed.")),
+                cx,
+            );
+            return;
+        };
         let Some(action_editor) = &self.action_editor else {
             return;
         };
@@ -2657,7 +2754,7 @@ impl KeybindingEditorModal {
         };
 
         let (action_has_schema, temp_dir) = {
-            let keymap_editor = self.keymap_editor.read(cx);
+            let keymap_editor = keymap_editor.read(cx);
             let has_schema = keymap_editor.actions_with_schemas.contains(action_name);
             let temp_dir = keymap_editor
                 .action_args_temp_dir
@@ -2779,6 +2876,10 @@ impl KeybindingEditorModal {
     }
 
     fn save(&mut self, cx: &mut Context<Self>) -> Result<(), InputError> {
+        let keymap_editor = self
+            .keymap_editor
+            .upgrade()
+            .ok_or_else(|| InputError::error(anyhow!("The keymap editor has closed.")))?;
         let existing_keybind = self.editing_keybind.clone();
         let fs = self.fs.clone();
 
@@ -2797,8 +2898,7 @@ impl KeybindingEditorModal {
             context: new_context.map(SharedString::from),
         };
 
-        let conflicting_indices = self
-            .keymap_editor
+        let conflicting_indices = keymap_editor
             .read(cx)
             .keybinding_conflict_state
             .conflicting_indices_for_mapping(
@@ -2811,8 +2911,7 @@ impl KeybindingEditorModal {
             remaining_conflict_amount,
         }|
         {
-            let conflicting_action_name = self
-                .keymap_editor
+            let conflicting_action_name = keymap_editor
                 .read(cx)
                 .keybindings
                 .get(first_conflict_index)
@@ -2862,7 +2961,7 @@ impl KeybindingEditorModal {
             None,
             &HashSet::default(),
             cx.action_documentation(),
-            &self.keymap_editor.read(cx).humanized_action_names,
+            &keymap_editor.read(cx).humanized_action_names,
         );
 
         let keybind_for_save = if create {
@@ -2885,7 +2984,16 @@ impl KeybindingEditorModal {
             {
                 Ok(_) => {
                     this.update(cx, |this, cx| {
-                        this.keymap_editor.update(cx, |keymap, cx| {
+                        let Some(keymap_editor) = this.keymap_editor.upgrade() else {
+                            this.set_error(
+                                InputError::error(anyhow!(
+                                    "The binding was saved, but the keymap editor has closed."
+                                )),
+                                cx,
+                            );
+                            return;
+                        };
+                        keymap_editor.update(cx, |keymap, cx| {
                             keymap.previous_edit = Some(PreviousEdit::Keybinding {
                                 action_mapping,
                                 action_name,
@@ -3011,13 +3119,16 @@ impl KeybindingEditorModal {
     }
 
     fn get_matching_bindings_count(&self, cx: &Context<Self>) -> usize {
+        let Some(keymap_editor) = self.keymap_editor.upgrade() else {
+            return 0;
+        };
         let current_keystrokes = self.keybind_editor.read(cx).keystrokes();
 
         if current_keystrokes.is_empty() {
             return 0;
         }
 
-        self.keymap_editor
+        keymap_editor
             .read(cx)
             .keybindings
             .iter()
@@ -3036,9 +3147,16 @@ impl KeybindingEditorModal {
     }
 
     fn show_matching_bindings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(keymap_editor) = self.keymap_editor.upgrade() else {
+            self.set_error(
+                InputError::error(anyhow!("The keymap editor has closed.")),
+                cx,
+            );
+            return;
+        };
         let keystrokes = self.keybind_editor.read(cx).keystrokes().to_vec();
 
-        self.keymap_editor.update(cx, |keymap_editor, cx| {
+        keymap_editor.update(cx, |keymap_editor, cx| {
             keymap_editor.clear_action_query(window, cx)
         });
 
@@ -3046,7 +3164,7 @@ impl KeybindingEditorModal {
         cx.emit(DismissEvent);
 
         // Update the keymap editor to show matching keystrokes
-        self.keymap_editor.update(cx, |editor, cx| {
+        keymap_editor.update(cx, |editor, cx| {
             editor.filter_state = FilterState::All;
             editor.search_mode = SearchMode::KeyStroke { exact_match: true };
             editor.keystroke_editor.update(cx, |keystroke_editor, cx| {
@@ -4391,5 +4509,271 @@ mod tests {
             0,
             &binding_then_unbind,
         ));
+    }
+}
+
+impl KeymapEditor {
+    fn render_embedded(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let text = |value: SharedString, size: f32, color: u32| {
+            div()
+                .text_size(px(size))
+                .line_height(px(16.))
+                .text_color(gpui::rgb(color))
+                .child(value)
+        };
+        let columns = [300., 130., 150., 416., 88.];
+        let focus_handle = self.focus_handle.clone();
+        let table = v_flex()
+            .flex_1()
+            .min_h_0()
+            .border_1()
+            .border_color(gpui::rgb(0x3C3F4C))
+            .rounded(px(9.))
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .h(px(36.))
+                    .flex_none()
+                    .px(px(15.))
+                    .bg(gpui::rgb(0x2B2E3A))
+                    .border_b_1()
+                    .border_color(gpui::rgb(0x414453))
+                    .children(
+                        ["Action", "Arguments", "Keystrokes", "Context", "Source"]
+                            .into_iter()
+                            .zip(columns)
+                            .map(|(label, width)| {
+                                text(ui::localized(label, cx), 12., 0xA1A4B8)
+                                    .w(px(width))
+                                    .min_w_0()
+                                    .overflow_hidden()
+                            }),
+                    ),
+            )
+            .child(
+                gpui::uniform_list(
+                    "embedded-keybindings",
+                    self.matches.len(),
+                    cx.processor(move |this, range: Range<usize>, _, cx| {
+                        range
+                            .filter_map(|index| {
+                                let candidate = this.matches.get(index)?.candidate_id;
+                                let binding = this.keybindings.get(candidate)?;
+                                let cells = [
+                                    binding.action().humanized_name.clone(),
+                                    binding
+                                        .action()
+                                        .arguments
+                                        .as_ref()
+                                        .map(|arguments| arguments.text.clone())
+                                        .unwrap_or_else(|| "—".into()),
+                                    binding
+                                        .keystroke_text()
+                                        .cloned()
+                                        .unwrap_or_else(|| "—".into()),
+                                    binding
+                                        .context()
+                                        .and_then(|context| context.local().cloned())
+                                        .unwrap_or_default(),
+                                    binding
+                                        .keybind_source()
+                                        .map(|source| SharedString::from(source.name()))
+                                        .unwrap_or_else(|| "—".into()),
+                                ];
+                                Some(
+                                    h_flex()
+                                        .id(("embedded-binding", index))
+                                        .h(px(27.))
+                                        .px(px(15.))
+                                        .cursor_pointer()
+                                        .bg(gpui::rgb(if this.selected_index == Some(index) {
+                                            0x373342
+                                        } else if index % 2 == 0 {
+                                            0x252833
+                                        } else {
+                                            0x292C38
+                                        }))
+                                        .children(cells.into_iter().zip(columns).enumerate().map(
+                                            |(column, (value, width))| {
+                                                div()
+                                                    .w(px(width))
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .text_ellipsis()
+                                                    .text_size(px(if column == 2 || column == 3 {
+                                                        10.
+                                                    } else {
+                                                        12.
+                                                    }))
+                                                    .line_height(px(16.))
+                                                    .text_color(gpui::rgb(if column == 2 {
+                                                        0xD9CBE8
+                                                    } else if column == 0 {
+                                                        0xCACBD9
+                                                    } else {
+                                                        0xA1A4B8
+                                                    }))
+                                                    .child(value)
+                                            },
+                                        ))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.select_index(index, None, window, cx);
+                                            this.open_edit_keybinding_modal(false, window, cx);
+                                        })),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&self.embedded_scroll)
+                .flex_1()
+                .min_h_0(),
+            );
+        v_flex()
+            .id("embedded-keymap-editor")
+            .size_full()
+            .min_w_0()
+            .relative()
+            .track_focus(&focus_handle)
+            .key_context(self.key_context())
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::select_first))
+            .on_action(cx.listener(Self::select_last))
+            .on_action(cx.listener(Self::focus_search))
+            .on_action(cx.listener(Self::edit_binding))
+            .on_action(cx.listener(Self::create_binding))
+            .on_action(cx.listener(Self::open_create_keybinding_modal))
+            .on_action(cx.listener(Self::delete_binding))
+            .on_action(cx.listener(Self::toggle_conflict_filter))
+            .on_action(cx.listener(Self::toggle_no_action_bindings))
+            .on_action(cx.listener(Self::toggle_keystroke_search))
+            .on_action(cx.listener(Self::toggle_exact_keystroke_matching))
+            .bg(gpui::rgb(0x232530))
+            .px(px(32.))
+            .pt(px(32.))
+            .pb(px(24.))
+            .gap(px(16.))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(26.))
+                            .line_height(px(34.))
+                            .text_color(gpui::rgb(0xECECF2))
+                            .child(ui::localized("Keymap", cx)),
+                    )
+                    .child(text(
+                        format!("{} bindings", BaseKeymap::get_global(cx)).into(),
+                        12.,
+                        0xA1A4B8,
+                    )),
+            )
+            .child(
+                h_flex()
+                    .h(px(36.))
+                    .flex_none()
+                    .gap(px(10.))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .px(px(12.))
+                            .gap(px(10.))
+                            .rounded(px(7.))
+                            .border_1()
+                            .border_color(gpui::rgb(0x414453))
+                            .bg(gpui::rgb(0x292C38))
+                            .child(
+                                Icon::new(IconName::MagnifyingGlass)
+                                    .size(IconSize::Custom(rems_from_px(15_f32))),
+                            )
+                            .child(self.filter_editor.clone()),
+                    )
+                    .child(self.render_filter_dropdown(&focus_handle, cx))
+                    .child(
+                        ui::ButtonLike::new("embedded-keymap-json")
+                            .size(ButtonSize::None)
+                            .height(px(36.).into())
+                            .corner_radius(px(7.))
+                            .custom_style(|this| {
+                                this.px(px(12.))
+                                    .border_1()
+                                    .border_color(gpui::rgb(0x414453))
+                            })
+                            .child(text(ui::localized("Edit in JSON", cx), 12., 0xD3D1DF))
+                            .on_click(|_, window, cx| {
+                                window
+                                    .dispatch_action(zed_actions::OpenKeymapFile.boxed_clone(), cx)
+                            }),
+                    )
+                    .child(
+                        ui::ButtonLike::new("embedded-keymap-create")
+                            .size(ButtonSize::None)
+                            .height(px(36.).into())
+                            .corner_radius(px(7.))
+                            .background(gpui::rgb(0x3A3346).into())
+                            .custom_style(|this| {
+                                this.px(px(12.))
+                                    .border_1()
+                                    .border_color(gpui::rgb(0x655971))
+                            })
+                            .child(
+                                h_flex()
+                                    .gap(px(9.))
+                                    .child(
+                                        Icon::new(IconName::Plus)
+                                            .size(IconSize::Custom(rems_from_px(14_f32))),
+                                    )
+                                    .child(text(
+                                        ui::localized("Create keybinding", cx),
+                                        12.,
+                                        0xE0D4EF,
+                                    )),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_create_keybinding_modal(
+                                    &OpenCreateKeybindingModal,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    ),
+            )
+            .when(
+                matches!(self.search_mode, SearchMode::KeyStroke { .. }),
+                |this| this.child(self.keystroke_editor.clone()),
+            )
+            .child(table)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(text(
+                        format!("{} bindings", self.matches.len()).into(),
+                        11.,
+                        0x989BAD,
+                    ))
+                    .child(text(
+                        ui::localized("Select a binding to edit its shortcut", cx),
+                        11.,
+                        0x989BAD,
+                    )),
+            )
+            .when_some(self.embedded_modal.clone(), |this, modal| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(gpui::rgba(0x11131C99))
+                        .flex()
+                        .justify_center()
+                        .items_start()
+                        .pt(px(80.))
+                        .child(modal),
+                )
+            })
+            .into_any_element()
     }
 }

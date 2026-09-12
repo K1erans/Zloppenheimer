@@ -2318,7 +2318,12 @@ impl Thread {
         self.end_turn_at_next_boundary
     }
 
-    fn accumulate_token_usage(&mut self, update: language_model::TokenUsage) {
+    fn accumulate_token_usage(
+        &mut self,
+        update: language_model::TokenUsage,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_total = self.cumulative_token_usage.total_tokens();
         let previous_accounted_usage = self.current_request_token_usage;
         let current_accounted_usage = TokenUsage {
             input_tokens: previous_accounted_usage
@@ -2350,10 +2355,19 @@ impl Thread {
                     .cache_read_input_tokens
                     .saturating_sub(previous_accounted_usage.cache_read_input_tokens),
             };
+        if !self.is_subagent() {
+            crate::ActivityStore::record_tokens(
+                format!("zed:{}", self.id()),
+                self.cumulative_token_usage
+                    .total_tokens()
+                    .saturating_sub(previous_total),
+                cx,
+            );
+        }
     }
 
     fn update_token_usage(&mut self, update: language_model::TokenUsage, cx: &mut Context<Self>) {
-        self.accumulate_token_usage(update);
+        self.accumulate_token_usage(update, cx);
 
         let Some(last_user_message) = self.last_user_message() else {
             return;
@@ -3216,8 +3230,8 @@ impl Thread {
                     event_stream.send_context_compaction_update(compaction_id.clone(), &text);
                 }
                 LanguageModelCompletionEvent::UsageUpdate(usage) => {
-                    this.update(cx, |this, _cx| {
-                        this.accumulate_token_usage(usage);
+                    this.update(cx, |this, cx| {
+                        this.accumulate_token_usage(usage, cx);
                     })?;
                 }
                 LanguageModelCompletionEvent::Stop(_)

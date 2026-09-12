@@ -35,7 +35,7 @@ pub fn acp_model_selector(
     let delegate = ModelPickerDelegate::new(selector, focus_handle, window, cx);
     Picker::list(delegate, window, cx)
         .show_scrollbar(true)
-        .initial_width(rems(20.))
+        .initial_width(rems_from_px(340_f32))
 }
 
 enum ModelPickerEntry {
@@ -216,7 +216,11 @@ impl PickerDelegate for ModelPickerDelegate {
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
-        "Select a model…".into()
+        "Search models…".into()
+    }
+
+    fn dropdown_style(&self) -> bool {
+        true
     }
 
     fn update_matches(

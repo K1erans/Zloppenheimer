@@ -238,6 +238,7 @@ impl SystemWindowTabs {
             })
             .child(label)
             .map(|this| match show_close_button {
+                ShowCloseButton::Active if !is_active => this,
                 ShowCloseButton::Hidden => this,
                 _ => this.child(
                     div()

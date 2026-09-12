@@ -23,6 +23,7 @@ use agent_ui::{
 };
 use agent_ui::{MessageEditorEvent, StateChange, thread_worktree_archive};
 use chrono::{DateTime, Utc};
+use client::{Client, UserStore};
 use editor::Editor;
 use feature_flags::{
     AgentThreadWorktreeLabel, AgentThreadWorktreeLabelFlag, FeatureFlag, FeatureFlagAppExt as _,
@@ -43,6 +44,7 @@ use project::{
     AgentId, AgentRegistryStore, Event as ProjectEvent, WorktreeId, repo_identity_path_if_local,
 };
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
+use recent_projects::{RemoteSettings, open_remote_project};
 use remote::{RemoteConnectionOptions, same_remote_connection_identity};
 use ui::utils::platform_title_bar_height;
 
@@ -56,24 +58,28 @@ use std::rc::Rc;
 use std::sync::Arc;
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::{
-    AgentThreadStatus, CommonAnimationExt, ContextMenu, ContextMenuEntry, Divider, GradientFade,
-    HighlightedLabel, KeyBinding, PopoverMenu, PopoverMenuHandle, ProjectEmptyState, ScrollAxes,
-    Scrollbars, Tab, ThreadItem, ThreadItemWorktreeInfo, TintColor, Tooltip, WithScrollbar,
-    prelude::*, render_modifiers, right_click_menu,
+    AgentThreadStatus, Avatar, ButtonLike, CommonAnimationExt, ContextMenu, ContextMenuEntry,
+    GradientFade, HighlightedLabel, KeyBinding, ListItem, ListItemSpacing, PopoverMenu,
+    PopoverMenuHandle, ScrollAxes, Scrollbars, Tab, ThreadItem, ThreadItemWorktreeInfo, TintColor,
+    Tooltip, WithScrollbar, prelude::*, render_modifiers, right_click_menu,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 use util::ResultExt as _;
 use util::path_list::PathList;
 use workspace::{
     CloseWindow, FocusWorkspaceSidebar, MoveProjectDown, MoveProjectUp, MultiWorkspace,
-    MultiWorkspaceEvent, NextProject, NextThread, Open, OpenMode, PreviousProject, PreviousThread,
-    ProjectGroupKey, RemovalIntent, SaveIntent, Sidebar as WorkspaceSidebar, SidebarSide, Toast,
-    ToggleWorkspaceSidebar, Workspace, notifications::NotificationId, sidebar_side_context_menu,
+    MultiWorkspaceEvent, NextProject, NextThread, OpenMode, PreviousProject, PreviousThread,
+    ProjectGroupKey, RecentWorkspace, RemovalIntent, SaveIntent, SerializedWorkspaceLocation,
+    Sidebar as WorkspaceSidebar, SidebarSide, Toast, ToggleWorkspaceSidebar, Workspace,
+    WorkspaceDb,
+    dock::PanelHandle,
+    notifications::{DetachAndPromptErr, NotificationId},
+    sidebar_side_context_menu,
 };
 
 use git_ui_core::worktree_service::{RemoteBranchName, worktree_create_targets};
 use zed_actions::editor::{MoveDown, MoveUp};
-use zed_actions::{CreateWorktree, NewWorktreeBranchTarget, OpenRecent};
+use zed_actions::{CreateWorktree, NewWorktreeBranchTarget, OpenRecent, OpenSettings};
 
 use zed_actions::agents_sidebar::{FocusSidebarFilter, ToggleThreadSwitcher};
 
@@ -103,7 +109,7 @@ gpui::actions!(
     ]
 );
 
-const DEFAULT_WIDTH: Pixels = px(300.0);
+const DEFAULT_WIDTH: Pixels = px(296.0);
 const MIN_WIDTH: Pixels = px(200.0);
 const MAX_WIDTH: Pixels = px(800.0);
 
@@ -462,26 +468,6 @@ impl ListEntry {
             ListEntry::Terminal(_) | ListEntry::ProjectHeader { .. } => None,
         }
     }
-
-    fn reachable_workspaces<'a>(
-        &'a self,
-        multi_workspace: &'a workspace::MultiWorkspace,
-        cx: &'a App,
-    ) -> Vec<Entity<Workspace>> {
-        match self {
-            ListEntry::Thread(thread) => match &thread.workspace {
-                ThreadEntryWorkspace::Open(ws) => vec![ws.clone()],
-                ThreadEntryWorkspace::Closed { .. } => Vec::new(),
-            },
-            ListEntry::Terminal(terminal) => match &terminal.workspace {
-                ThreadEntryWorkspace::Open(workspace) => vec![workspace.clone()],
-                ThreadEntryWorkspace::Closed { .. } => Vec::new(),
-            },
-            ListEntry::ProjectHeader { key, .. } => {
-                multi_workspace.workspaces_for_project_group(key, cx)
-            }
-        }
-    }
 }
 
 impl From<ThreadEntry> for ListEntry {
@@ -518,8 +504,8 @@ enum EntryShape {
         // `!is_collapsed && !has_threads`).
         is_collapsed: bool,
     },
-    Thread(ThreadId),
-    Terminal(TerminalId),
+    Thread(ThreadId, Option<(&'static str, bool)>),
+    Terminal(TerminalId, Option<(&'static str, bool)>),
 }
 
 impl SidebarContents {
@@ -762,6 +748,8 @@ fn create_worktree_in_workspace(
 /// be computed from the current world state, compute it in the rebuild.
 pub struct Sidebar {
     multi_workspace: WeakEntity<MultiWorkspace>,
+    client: Arc<Client>,
+    user_store: Entity<UserStore>,
     width: Pixels,
     focus_handle: FocusHandle,
     filter_editor: Entity<Editor>,
@@ -818,6 +806,11 @@ pub struct Sidebar {
     /// Display names of other release channels that have threads available to
     /// import.
     cross_channel_import_channels: Vec<SharedString>,
+    /// Recently opened projects, shown when the window has no project of its
+    /// own. `None` while the first load is still in flight, so that the "no
+    /// projects" message is not flashed before the real list arrives.
+    recent_workspaces: Option<Vec<RecentWorkspace>>,
+    _recent_workspaces_task: Option<Task<()>>,
 }
 
 impl Sidebar {
@@ -850,10 +843,12 @@ impl Sidebar {
                 }
                 MultiWorkspaceEvent::WorkspaceAdded(workspace) => {
                     this.subscribe_to_workspace(workspace, window, cx);
+                    this.reload_recent_projects(cx);
                     this.schedule_update_entries(false, cx);
                 }
                 MultiWorkspaceEvent::WorkspaceRemoved(_)
                 | MultiWorkspaceEvent::ProjectGroupsChanged => {
+                    this.reload_recent_projects(cx);
                     this.schedule_update_entries(false, cx);
                 }
             },
@@ -912,11 +907,23 @@ impl Sidebar {
                     this.subscribe_to_workspace(workspace, window, cx);
                 }
             }
+            this.reload_recent_projects(cx);
             this.schedule_update_entries(false, cx);
         });
 
+        let app_state = multi_workspace
+            .read(cx)
+            .workspace()
+            .read(cx)
+            .app_state()
+            .clone();
+        let user_store = app_state.user_store.clone();
+        cx.observe(&user_store, |_this, _, cx| cx.notify()).detach();
+
         Self {
             multi_workspace: multi_workspace.downgrade(),
+            client: app_state.client.clone(),
+            user_store,
             width: DEFAULT_WIDTH,
             focus_handle,
             filter_editor,
@@ -949,7 +956,35 @@ impl Sidebar {
             update_task: None,
             import_banners_use_verbose_labels: None,
             cross_channel_import_channels: Vec::new(),
+            recent_workspaces: None,
+            _recent_workspaces_task: None,
         }
+    }
+
+    /// Reloads the recent-project list backing the sidebar's empty state. The
+    /// database is only consulted on demand because the list changes just when
+    /// projects are opened or closed.
+    fn reload_recent_projects(&mut self, cx: &mut Context<Self>) {
+        let Some(fs) = self
+            .multi_workspace
+            .upgrade()
+            .map(|mw| mw.read(cx).workspace().read(cx).app_state().fs.clone())
+        else {
+            return;
+        };
+        let db = WorkspaceDb::global(cx);
+        self._recent_workspaces_task = Some(cx.spawn(async move |this, cx| {
+            let workspaces = db
+                .recent_project_workspaces(fs.as_ref())
+                .await
+                .log_err()
+                .unwrap_or_default();
+            this.update(cx, |this, cx| {
+                this.recent_workspaces = Some(workspaces);
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn serialize(&mut self, cx: &mut Context<Self>) {
@@ -1362,12 +1397,6 @@ impl Sidebar {
     /// Aim for a single forward pass over workspaces and threads plus an
     /// O(T log T) sort. Avoid adding extra scans over the data.
     ///
-    /// Properties:
-    ///
-    /// - Should always show every workspace in the multiworkspace
-    ///     - If you have no threads, and two workspaces for the worktree and the main workspace, make sure at least one is shown
-    /// - Should always show every thread, associated with each workspace in the multiworkspace
-    /// - After every build_contents, our "active" state should exactly match the current workspace's, current agent panel's current thread.
     fn rebuild_contents(&mut self, cx: &App) {
         let Some(multi_workspace) = self.multi_workspace.upgrade() else {
             return;
@@ -1569,12 +1598,11 @@ impl Sidebar {
 
             let label = group_key.display_name(&path_detail_map);
 
-            let is_collapsed = self.is_group_collapsed(group_key, cx);
-            let should_load_threads = !is_collapsed || !query.is_empty();
-
             let is_active = active_workspace
                 .as_ref()
                 .is_some_and(|active| group_workspaces.contains(active));
+            let is_collapsed = !is_active && self.is_group_collapsed(group_key, cx);
+            let should_load_threads = !is_collapsed || !query.is_empty();
 
             // Collect live thread infos from all workspaces in this group.
             let live_infos = group_workspaces
@@ -1991,6 +2019,16 @@ impl Sidebar {
 
         self.live_thread_statuses = new_live_statuses;
 
+        let mut is_active_group = false;
+        entries.retain(|entry| match entry {
+            ListEntry::ProjectHeader { is_active, .. } => {
+                is_active_group = *is_active;
+                false
+            }
+            ListEntry::Thread(_) | ListEntry::Terminal(_) => is_active_group,
+        });
+        project_header_indices.clear();
+
         self.contents = SidebarContents {
             entries,
             notified_threads,
@@ -2032,6 +2070,13 @@ impl Sidebar {
             self.entry_shapes(multi_workspace.read(cx)).collect();
 
         self.rebuild_contents(cx);
+        self.selection = self.selection.and_then(|selection| {
+            self.contents
+                .entries
+                .len()
+                .checked_sub(1)
+                .map(|last| selection.min(last))
+        });
         self.refresh_refilled_draft_times(cx);
         self.refresh_draft_editor_observations(cx);
 
@@ -2083,20 +2128,38 @@ impl Sidebar {
         &'a self,
         multi_workspace: &'a MultiWorkspace,
     ) -> impl Iterator<Item = EntryShape> + 'a {
-        self.contents.entries.iter().map(move |entry| match entry {
-            ListEntry::ProjectHeader {
-                key, has_threads, ..
-            } => EntryShape::ProjectHeader {
-                key: key.clone(),
-                has_threads: *has_threads,
-                is_collapsed: multi_workspace
-                    .group_state_by_key(key)
-                    .map(|state| !state.expanded)
-                    .unwrap_or(false),
-            },
-            ListEntry::Thread(thread) => EntryShape::Thread(thread.metadata.thread_id),
-            ListEntry::Terminal(terminal) => EntryShape::Terminal(terminal.metadata.terminal_id),
-        })
+        self.contents
+            .entries
+            .iter()
+            .enumerate()
+            .map(move |(index, entry)| {
+                let group = Self::entry_date_group(entry);
+                let previous_group = index
+                    .checked_sub(1)
+                    .and_then(|previous| self.contents.entries.get(previous))
+                    .and_then(Self::entry_date_group);
+                let heading = group
+                    .filter(|group| Some(*group) != previous_group)
+                    .map(|group| (group, index == 0));
+                match entry {
+                    ListEntry::ProjectHeader {
+                        key, has_threads, ..
+                    } => EntryShape::ProjectHeader {
+                        key: key.clone(),
+                        has_threads: *has_threads,
+                        is_collapsed: multi_workspace
+                            .group_state_by_key(key)
+                            .map(|state| !state.expanded)
+                            .unwrap_or(false),
+                    },
+                    ListEntry::Thread(thread) => {
+                        EntryShape::Thread(thread.metadata.thread_id, heading)
+                    }
+                    ListEntry::Terminal(terminal) => {
+                        EntryShape::Terminal(terminal.metadata.terminal_id, heading)
+                    }
+                }
+            })
     }
 
     /// Detects drafts that just went from empty back to having content and
@@ -2249,6 +2312,28 @@ impl Sidebar {
             }
         };
 
+        let date_group = Self::entry_date_group(entry);
+        let previous_date_group = ix
+            .checked_sub(1)
+            .and_then(|previous| self.contents.entries.get(previous))
+            .and_then(Self::entry_date_group);
+        if let Some(date_group) = date_group.filter(|group| Some(*group) != previous_date_group) {
+            return v_flex()
+                .w_full()
+                .child(
+                    div()
+                        .px(px(18.))
+                        .pt(px(if ix == 0 { 24. } else { 26. }))
+                        .pb(px(8.))
+                        .text_size(px(11.))
+                        .line_height(px(14.))
+                        .text_color(cx.theme().colors().text_muted)
+                        .child(date_group),
+                )
+                .child(rendered)
+                .into_any_element();
+        }
+
         if is_group_header_after_first {
             v_flex()
                 .w_full()
@@ -2259,6 +2344,43 @@ impl Sidebar {
         } else {
             rendered
         }
+    }
+
+    fn format_thread_timestamp(timestamp: DateTime<Utc>) -> String {
+        let now = Utc::now();
+        let elapsed = now.signed_duration_since(timestamp);
+        if elapsed.num_minutes() < 1 {
+            "Now".to_owned()
+        } else if elapsed.num_hours() < 24 {
+            format_history_entry_timestamp(timestamp)
+        } else if elapsed.num_days() < 7 {
+            timestamp
+                .with_timezone(&chrono::Local)
+                .format("%a")
+                .to_string()
+        } else {
+            format_history_entry_timestamp(timestamp)
+        }
+    }
+
+    fn entry_date_group(entry: &ListEntry) -> Option<&'static str> {
+        let timestamp = match entry {
+            ListEntry::Thread(thread) if thread.draft.is_some() => return Some("TODAY"),
+            ListEntry::Thread(thread) => Self::thread_display_time(&thread.metadata),
+            ListEntry::Terminal(terminal) => terminal.metadata.created_at,
+            ListEntry::ProjectHeader { .. } => return None,
+        };
+        let age = chrono::Local::now()
+            .date_naive()
+            .signed_duration_since(timestamp.with_timezone(&chrono::Local).date_naive())
+            .num_days();
+        Some(if age <= 0 {
+            "TODAY"
+        } else if age <= 7 {
+            "PREVIOUS 7 DAYS"
+        } else {
+            "OLDER"
+        })
     }
 
     fn render_remote_project_icon(
@@ -6229,28 +6351,21 @@ impl Sidebar {
 
         let id = SharedString::from(format!("thread-entry-{}", ix));
 
-        let color = cx.theme().colors();
-        let sidebar_bg = color
-            .title_bar_background
-            .blend(color.panel_background.opacity(0.25));
-
         let timestamp: SharedString = if is_empty_draft {
             SharedString::default()
         } else {
-            format_history_entry_timestamp(Self::thread_display_time(&thread.metadata)).into()
+            Self::format_thread_timestamp(Self::thread_display_time(&thread.metadata)).into()
         };
 
         let is_remote = thread.workspace.is_remote(cx);
-
         let worktrees = apply_worktree_label_mode(
             thread.worktrees.clone(),
             cx.flag_value::<AgentThreadWorktreeLabelFlag>(),
         );
-
-        let (icon, icon_svg) = if is_draft {
-            (IconName::Circle, None)
+        let icon = if is_draft {
+            IconName::Circle
         } else {
-            (thread.icon, thread.icon_from_external_svg.clone())
+            IconName::Thread
         };
 
         let title_generating = thread.is_title_generating
@@ -6259,16 +6374,14 @@ impl Sidebar {
                 .contains(&thread.metadata.thread_id);
 
         let thread_item = ThreadItem::new(id, title.clone())
-            .base_bg(sidebar_bg)
+            .compact(true)
+            .base_bg(cx.theme().colors().panel_background)
             .icon(icon)
             .when(is_draft, |this| {
                 this.icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
             })
             .status(thread.status)
             .is_remote(is_remote)
-            .when_some(icon_svg, |this, svg| {
-                this.custom_icon_from_external_svg(svg)
-            })
             .worktrees(worktrees)
             .timestamp(timestamp)
             .highlight_positions(thread.highlight_positions.to_vec())
@@ -6676,6 +6789,18 @@ impl Sidebar {
 
     fn render_recent_projects_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let multi_workspace = self.multi_workspace.upgrade();
+        let project_name = self
+            .active_workspace(cx)
+            .and_then(|workspace| {
+                workspace
+                    .read(cx)
+                    .project()
+                    .read(cx)
+                    .visible_worktrees(cx)
+                    .next()
+                    .map(|worktree| worktree.read(cx).root_name_str().to_string())
+            })
+            .unwrap_or_else(|| "Zloppenheimer".to_string());
 
         let workspace = multi_workspace
             .as_ref()
@@ -6708,16 +6833,38 @@ impl Sidebar {
                 })
             })
             .trigger_with_tooltip(
-                IconButton::new("open-project", IconName::FolderAdd)
-                    .icon_size(IconSize::Small)
-                    .selected_style(ButtonStyle::Tinted(TintColor::Accent)),
-                |_window, cx| Tooltip::for_action("Add Project", &OpenRecent::default(), cx),
+                ButtonLike::new("open-project")
+                    .full_width()
+                    .size(ButtonSize::None)
+                    .height(px(64.).into())
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .text_left()
+                            .gap(px(10.))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(3.))
+                                    .child(
+                                        Label::new(project_name).size(LabelSize::Small).truncate(),
+                                    )
+                                    .child(
+                                        Label::new(ui::localized("Switch project", cx))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    ),
+                            )
+                            .child(Icon::new(IconName::ChevronDown).size(IconSize::Medium)),
+                    ),
+                |_window, cx| Tooltip::for_action("Switch Project", &OpenRecent::default(), cx),
             )
             .offset(gpui::Point {
-                x: px(-2.0),
-                y: px(-2.0),
+                x: px(-6.0),
+                y: px(0.0),
             })
-            .anchor(gpui::Anchor::BottomRight)
+            .anchor(gpui::Anchor::TopLeft)
     }
 
     fn new_thread_in_group(
@@ -6964,6 +7111,7 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         if workspace_path_list(workspace, cx).paths().is_empty() {
+            self.create_new_thread(workspace, window, cx);
             return;
         }
 
@@ -6991,10 +7139,6 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if workspace_path_list(workspace, cx).paths().is_empty() {
-            return;
-        }
-
         let Some(multi_workspace) = self.multi_workspace.upgrade() else {
             return;
         };
@@ -7107,48 +7251,26 @@ impl Sidebar {
         Some(multi_workspace.project_group_key_for_workspace(multi_workspace.workspace(), cx))
     }
 
-    fn active_project_header_position(&self, cx: &App) -> Option<usize> {
-        let active_key = self.active_project_group_key(cx)?;
-        self.contents
-            .project_header_indices
-            .iter()
-            .position(|&entry_ix| {
-                matches!(
-                    &self.contents.entries[entry_ix],
-                    ListEntry::ProjectHeader { key, .. } if *key == active_key
-                )
-            })
-    }
-
     fn cycle_project_impl(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(multi_workspace) = self.multi_workspace.upgrade() else {
             return;
         };
 
-        let header_count = self.contents.project_header_indices.len();
-        if header_count == 0 {
+        let keys = multi_workspace.read(cx).project_group_keys();
+        if keys.is_empty() {
             return;
         }
-
-        let current_pos = self.active_project_header_position(cx);
-
-        let next_pos = match current_pos {
-            Some(pos) => {
-                if forward {
-                    (pos + 1) % header_count
-                } else {
-                    (pos + header_count - 1) % header_count
-                }
-            }
+        let current_position = self
+            .active_project_group_key(cx)
+            .and_then(|active| keys.iter().position(|key| *key == active));
+        let next_position = match current_position {
+            Some(position) if forward => (position + 1) % keys.len(),
+            Some(position) => (position + keys.len() - 1) % keys.len(),
             None => 0,
         };
-
-        let header_entry_ix = self.contents.project_header_indices[next_pos];
-        let Some(ListEntry::ProjectHeader { key, .. }) = self.contents.entries.get(header_entry_ix)
-        else {
+        let Some(key) = keys.get(next_position).cloned() else {
             return;
         };
-        let key = key.clone();
 
         // Uncollapse the target group so that threads become visible.
         self.set_group_expanded(&key, true, cx);
@@ -7281,38 +7403,271 @@ impl Sidebar {
             )
     }
 
-    fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        ProjectEmptyState::new(
-            "Threads Sidebar",
-            self.focus_handle(cx),
-            KeyBinding::for_action(&workspace::Open::default(), cx),
-        )
-        .on_open_project(|_, window, cx| {
-            let side = match AgentSettings::get_global(cx).sidebar_side() {
-                SidebarSide::Left => "left",
-                SidebarSide::Right => "right",
-            };
-            telemetry::event!("Sidebar Add Project Clicked", side = side);
-            window.dispatch_action(
-                Open {
-                    create_new_window: Some(false),
-                }
-                .boxed_clone(),
-                cx,
-            );
-        })
-        .on_clone_repo(|_, window, cx| {
-            window.dispatch_action(git::Clone.boxed_clone(), cx);
-        })
+    /// The sidebar's content when the window has no project of its own: the
+    /// repositories and projects that were opened recently, so one can be picked
+    /// without leaving the sidebar.
+    fn render_empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(recent_workspaces) = self.recent_workspaces.as_ref() else {
+            return div().size_full().into_any_element();
+        };
+
+        if recent_workspaces.is_empty() {
+            return v_flex()
+                .id("sidebar-no-projects")
+                .p_4()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .track_focus(&self.focus_handle)
+                .child(
+                    Label::new("No projects — add one")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .into_any_element();
+        }
+
+        let rows = recent_workspaces
+            .iter()
+            .enumerate()
+            .map(|(index, recent_workspace)| {
+                self.render_recent_project(index, recent_workspace, cx)
+            })
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .id("sidebar-recent-projects")
+            .size_full()
+            .track_focus(&self.focus_handle)
+            .child(
+                div().px_2().pt_2().pb_1().child(
+                    Label::new("Projects")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                v_flex()
+                    .id("sidebar-recent-projects-list")
+                    .px_1()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+            .into_any_element()
     }
 
-    fn render_sidebar_header(
+    fn render_recent_project(
         &self,
-        no_open_projects: bool,
+        index: usize,
+        recent_workspace: &RecentWorkspace,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let name = SharedString::from(workspace::welcome::project_name(
+            &recent_workspace.identity_paths,
+        ));
+        let full_path = SharedString::from(
+            recent_workspace
+                .paths
+                .paths()
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .join(", "),
+        );
+        let icon = match recent_workspace.location {
+            SerializedWorkspaceLocation::Local => IconName::Folder,
+            SerializedWorkspaceLocation::Remote(_) => IconName::Server,
+        };
+        let recent_workspace = recent_workspace.clone();
+
+        ListItem::new(("sidebar-recent-project", index))
+            .spacing(ListItemSpacing::Sparse)
+            .start_slot(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+            .child(Label::new(name).size(LabelSize::Small).truncate())
+            .tooltip(Tooltip::text(full_path))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_recent_project(&recent_workspace, window, cx);
+            }))
+    }
+
+    fn open_recent_project(
+        &mut self,
+        recent_workspace: &RecentWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let side = match AgentSettings::get_global(cx).sidebar_side() {
+            SidebarSide::Left => "left",
+            SidebarSide::Right => "right",
+        };
+        telemetry::event!("Sidebar Recent Project Clicked", side = side);
+
+        let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() else {
+            return;
+        };
+        let paths = recent_workspace.paths.paths().to_vec();
+        match &recent_workspace.location {
+            SerializedWorkspaceLocation::Local => {
+                cx.defer(move |cx| {
+                    if let Some(task) = handle
+                        .update(cx, |multi_workspace, window, cx| {
+                            multi_workspace.open_project(paths, OpenMode::Activate, window, cx)
+                        })
+                        .log_err()
+                    {
+                        task.detach_and_log_err(cx);
+                    }
+                });
+            }
+            SerializedWorkspaceLocation::Remote(connection) => {
+                let Some(workspace) = self.active_workspace(cx) else {
+                    return;
+                };
+                let app_state = workspace.read(cx).app_state().clone();
+                let mut connection = connection.clone();
+                // Persisted SSH entries only carry the host; the rest of the
+                // connection details live in settings.
+                if let RemoteConnectionOptions::Ssh(connection) = &mut connection {
+                    RemoteSettings::get_global(cx)
+                        .fill_connection_options_from_settings(connection);
+                }
+                let open_options = workspace::OpenOptions {
+                    requesting_window: Some(handle),
+                    ..Default::default()
+                };
+                cx.spawn_in(window, async move |_, cx| {
+                    open_remote_project(connection, paths, app_state, open_options, cx).await
+                })
+                .detach_and_prompt_err(
+                    "Failed to open project",
+                    window,
+                    cx,
+                    |_, _, _| None,
+                );
+            }
+        }
+    }
+
+    /// The panels the sidebar hosts on behalf of the workspace docks (project,
+    /// git, outline, …). Empty when this window has no sidebar-hosted panels.
+    fn hosted_panels(&self, cx: &App) -> Vec<Arc<dyn PanelHandle>> {
+        self.active_workspace(cx)
+            .map(|workspace| workspace.read(cx).sidebar_hosted_panels(cx))
+            .unwrap_or_default()
+    }
+
+    fn revealed_panel(&self, cx: &App) -> Option<Arc<dyn PanelHandle>> {
+        self.active_workspace(cx)?
+            .read(cx)
+            .revealed_sidebar_panel(cx)
+    }
+
+    /// The strip of panel icons along the sidebar's inner edge. The first entry
+    /// returns to the sidebar's own content; the rest reveal a hosted panel.
+    fn render_panel_rail(
+        &self,
+        panels: &[Arc<dyn PanelHandle>],
+        revealed_panel_id: Option<EntityId>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let has_query = self.has_filter_query(cx);
+        let color = cx.theme().colors();
+        let on_left = self.side(cx) == SidebarSide::Left;
+
+        let panel_buttons = panels
+            .iter()
+            .filter_map(|panel| {
+                let icon = match panel.icon(window, cx)? {
+                    IconName::FileTree => IconName::Folder,
+                    icon => icon,
+                };
+                let tooltip = panel.icon_tooltip(window, cx)?;
+                let panel_id = panel.panel_id();
+                Some(
+                    IconButton::new(("sidebar-rail-panel", panel_id), icon)
+                        .width(px(36.))
+                        .height(px(36.).into())
+                        .corner_radius(px(8.))
+                        .size(ButtonSize::Large)
+                        .icon_size(IconSize::Custom(rems_from_px(18_f32)))
+                        .toggle_state(revealed_panel_id == Some(panel_id))
+                        .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                        .tooltip(Tooltip::text(tooltip))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.toggle_hosted_panel(panel_id, window, cx);
+                        })),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .h_full()
+            .w(px(52.))
+            .flex_none()
+            .py(px(14.))
+            .gap(px(12.))
+            .items_center()
+            .bg(gpui::rgb(0x1C1E27))
+            .when(on_left, |this| this.border_r_1())
+            .when(!on_left, |this| this.border_l_1())
+            .border_color(color.border)
+            .child(
+                IconButton::new("sidebar-rail-threads", IconName::Thread)
+                    .width(px(36.))
+                    .height(px(36.).into())
+                    .corner_radius(px(8.))
+                    .size(ButtonSize::Large)
+                    .icon_size(IconSize::Custom(rems_from_px(18_f32)))
+                    .toggle_state(revealed_panel_id.is_none())
+                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                    .tooltip(Tooltip::text("Threads"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.hide_hosted_panels(window, cx);
+                    })),
+            )
+            .children(panel_buttons)
+            .child(div().flex_1())
+            .child(
+                IconButton::new("sidebar-rail-settings", IconName::Settings)
+                    .width(px(36.))
+                    .height(px(36.).into())
+                    .corner_radius(px(8.))
+                    .size(ButtonSize::Large)
+                    .icon_size(IconSize::Custom(rems_from_px(18_f32)))
+                    .tooltip(Tooltip::text("Settings"))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(OpenSettings.boxed_clone(), cx);
+                    }),
+            )
+    }
+
+    fn toggle_hosted_panel(
+        &mut self,
+        panel_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.active_workspace(cx) else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_sidebar_hosted_panel(panel_id, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn hide_hosted_panels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.active_workspace(cx) else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.hide_sidebar_hosted_panels(window, cx);
+        });
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn render_sidebar_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar_on_left = self.side(cx) == SidebarSide::Left;
         let sidebar_on_right = self.side(cx) == SidebarSide::Right;
         let not_fullscreen = !window.is_fullscreen() && !window.is_simple_fullscreen();
@@ -7342,43 +7697,141 @@ impl Sidebar {
             })
             .when(!right_window_controls, |this| this.pr_1p5())
             .gap_1()
-            .when(!no_open_projects, |this| {
-                this.border_b_1()
-                    .border_color(cx.theme().colors().border)
-                    .when(traffic_lights, |this| {
-                        this.child(Divider::vertical().color(ui::DividerColor::Border))
-                    })
+            .bg(cx.theme().colors().title_bar_background)
+            .child(div().flex_1())
+            .when(right_window_controls, |this| {
+                this.children(Self::render_right_window_controls(window, cx))
+            })
+    }
+
+    fn render_thread_navigation(
+        &self,
+        panel_name: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        v_flex()
+            .flex_none()
+            .px(px(16.))
+            .gap(px(12.))
+            .child(
+                h_flex()
+                    .gap(px(10.))
                     .child(
-                        div().ml_1().child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.render_recent_projects_button(cx)),
+                    )
+                    .child(self.render_sidebar_toggle_button(cx)),
+            )
+            .when(panel_name.is_none(), |this| {
+                this.child(
+                    h_flex()
+                        .h(px(34.))
+                        .px(px(10.))
+                        .gap(px(9.))
+                        .rounded(px(7.))
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .bg(cx.theme().colors().title_bar_background)
+                        .child(
                             Icon::new(IconName::MagnifyingGlass)
                                 .size(IconSize::Small)
                                 .color(Color::Muted),
-                        ),
-                    )
-                    .child(self.render_filter_input(cx))
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .when(
-                                self.selection.is_some()
-                                    && !self.filter_editor.focus_handle(cx).is_focused(window),
-                                |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
+                        )
+                        .child(self.render_filter_input(cx))
+                        .when(self.has_filter_query(cx), |this| {
+                            this.child(
+                                IconButton::new("clear_filter", IconName::Close)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Clear Search"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.reset_filter_editor_text(window, cx);
+                                        this.update_entries(cx);
+                                    })),
                             )
-                            .when(has_query, |this| {
-                                this.child(
-                                    IconButton::new("clear_filter", IconName::Close)
-                                        .icon_size(IconSize::Small)
-                                        .tooltip(Tooltip::text("Clear Search"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.reset_filter_editor_text(window, cx);
-                                            this.update_entries(cx);
-                                        })),
-                                )
-                            }),
-                    )
+                        }),
+                )
             })
-            .when(right_window_controls, |this| {
-                this.children(Self::render_right_window_controls(window, cx))
+            .when(panel_name == Some("Project Panel"), |this| {
+                this.child(
+                    ButtonLike::new("sidebar-search-files")
+                        .style(ButtonStyle::Outlined)
+                        .full_width()
+                        .height(px(34.).into())
+                        .corner_radius(px(7.))
+                        .background(gpui::rgb(0x20222C).into())
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap(px(9.))
+                                .px(px(9.))
+                                .child(
+                                    Icon::new(IconName::MagnifyingGlass)
+                                        .size(IconSize::Custom(rems_from_px(15_f32)))
+                                        .color(Color::Custom(gpui::rgb(0xB4B5C5).into())),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .line_height(px(18.))
+                                        .text_color(gpui::rgb(0xB4B5C5))
+                                        .child(ui::localized("Search files…", cx)),
+                                ),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let Some(workspace) = this.active_workspace(cx) {
+                                workspace.read(cx).focus_handle(cx).focus(window, cx);
+                            }
+                            match cx.build_action("file_finder::Toggle", None) {
+                                Ok(action) => window.dispatch_action(action, cx),
+                                Err(error) => log::error!("Could not open file search: {error:#}"),
+                            }
+                        })),
+                )
+            })
+            .when(panel_name.is_some(), |this| this.pb(px(12.)))
+            .when(panel_name.is_none(), |this| {
+                this.child(
+                    div()
+                        .w_full()
+                        .border_1()
+                        .border_color(cx.theme().status().info_border)
+                        .rounded(px(8.))
+                        .child(
+                            ButtonLike::new("sidebar-new-thread")
+                                .full_width()
+                                .height(px(36.).into())
+                                .corner_radius(px(7.))
+                                .style(ButtonStyle::Tinted(TintColor::Accent))
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .text_left()
+                                        .px(px(7.))
+                                        .gap(px(10.))
+                                        .child(
+                                            Icon::new(IconName::Plus)
+                                                .size(IconSize::Medium)
+                                                .color(Color::Accent),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_size(px(13.))
+                                                .child(ui::localized("New thread", cx)),
+                                        )
+                                        .child(KeyBinding::for_action_in(
+                                            &NewThreadInGroup,
+                                            &self.focus_handle,
+                                            cx,
+                                        )),
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.new_thread_in_group(&NewThreadInGroup, window, cx);
+                                })),
+                        ),
+                )
             })
     }
 
@@ -7419,7 +7872,10 @@ impl Sidebar {
                     IconName::ThreadsSidebarLeftOpen
                 };
                 IconButton::new("sidebar-close-toggle", icon)
-                    .icon_size(IconSize::Small)
+                    .size(ButtonSize::None)
+                    .width(px(18.))
+                    .height(px(18.).into())
+                    .icon_size(IconSize::Custom(rems_from_px(18_f32)))
                     .tooltip(Tooltip::element(move |_window, cx| {
                         v_flex()
                             .gap_1()
@@ -7452,6 +7908,84 @@ impl Sidebar {
             })
     }
 
+    /// The account row at the foot of the sidebar. On the home screen the
+    /// sidebar is the only chrome the user has, so the signed-in account is
+    /// surfaced here instead of only in the title bar.
+    fn render_account_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let border = cx.theme().colors().border;
+
+        let content = match self.user_store.read(cx).current_user() {
+            Some(user) => ButtonLike::new("sidebar-account")
+                .full_width()
+                .height(px(52.).into())
+                .aria_label("Account")
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap(px(10.))
+                        .child(Avatar::new(user.avatar_uri.clone()).size(px(30.)))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(2.))
+                                .child(
+                                    Label::new(user.username.clone())
+                                        .size(LabelSize::Small)
+                                        .truncate(),
+                                )
+                                .child(
+                                    Label::new(ui::localized("Account & settings", cx))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                        .child(Icon::new(IconName::ChevronDown).size(IconSize::Small)),
+                )
+                .tooltip(move |_, cx| Tooltip::for_action("Open Settings", &OpenSettings, cx))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(OpenSettings.boxed_clone(), cx);
+                })
+                .into_any_element(),
+            None => {
+                let client = self.client.clone();
+                ButtonLike::new("sidebar-sign-in")
+                    .full_width()
+                    .aria_label("Sign in")
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(
+                                Icon::new(IconName::Person)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(Label::new("Sign In").size(LabelSize::Small)),
+                    )
+                    .on_click(move |_, window, cx| {
+                        let client = client.clone();
+                        window
+                            .spawn(cx, async move |cx| {
+                                client
+                                    .sign_in_with_optional_connect(true, cx)
+                                    .await
+                                    .log_err();
+                            })
+                            .detach();
+                    })
+                    .into_any_element()
+            }
+        };
+
+        h_flex()
+            .min_h(px(68.))
+            .px(px(12.))
+            .border_t_1()
+            .border_color(border)
+            .child(content)
+    }
+
     fn render_sidebar_bottom_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_archive = matches!(self.view, SidebarView::Archive(..));
         let on_right = self.side(cx) == SidebarSide::Right;
@@ -7462,7 +7996,6 @@ impl Sidebar {
             .when(on_right, |this| this.flex_row_reverse())
             .border_t_1()
             .border_color(cx.theme().colors().border)
-            .child(self.render_sidebar_toggle_button(cx))
             .child(
                 IconButton::new("history", IconName::Clock)
                     .icon_size(IconSize::Small)
@@ -7480,7 +8013,9 @@ impl Sidebar {
                     })),
             )
             .child(div().flex_1())
-            .child(self.render_recent_projects_button(cx))
+            .when(is_archive, |this| {
+                this.child(self.render_recent_projects_button(cx))
+            })
     }
 
     fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
@@ -7876,12 +8411,13 @@ impl Render for Sidebar {
         let sticky_header = self.render_sticky_header(window, cx);
 
         let color = cx.theme().colors();
-        let bg = color
-            .title_bar_background
-            .blend(color.panel_background.opacity(0.25));
+        let bg = color.panel_background;
 
         let no_open_projects = !self.contents.has_open_projects;
         let no_search_results = self.contents.entries.is_empty();
+        let hosted_panels = self.hosted_panels(cx);
+        let revealed_panel = self.revealed_panel(cx);
+        let sidebar_on_left = self.side(cx) == SidebarSide::Left;
 
         v_flex()
             .id("workspace-sidebar")
@@ -7962,38 +8498,81 @@ impl Render for Sidebar {
             .when(self.side(cx) == SidebarSide::Right, |el| el.border_l_1())
             .border_color(color.border)
             .map(|this| match &self.view {
-                SidebarView::ThreadList => this
-                    .child(self.render_sidebar_header(no_open_projects, window, cx))
-                    .map(|this| {
-                        if no_open_projects {
-                            this.child(self.render_empty_state(cx))
-                        } else {
-                            this.child(
+                SidebarView::ThreadList => {
+                    this.child(self.render_sidebar_header(window, cx)).child(
+                        h_flex()
+                            // `h_flex` centers its children, which would collapse
+                            // the thread list to its content height; the rail and
+                            // the content both need the full column height.
+                            .items_stretch()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .when(!sidebar_on_left, |this| this.flex_row_reverse())
+                            .child(self.render_panel_rail(
+                                &hosted_panels,
+                                revealed_panel.as_ref().map(|panel| panel.panel_id()),
+                                window,
+                                cx,
+                            ))
+                            .child(
                                 v_flex()
-                                    .relative()
                                     .flex_1()
+                                    .min_w_0()
                                     .overflow_hidden()
-                                    .child(
-                                        list(
-                                            self.list_state.clone(),
-                                            cx.processor(Self::render_list_entry),
-                                        )
-                                        .flex_1()
-                                        .size_full(),
-                                    )
-                                    .when(no_search_results, |this| {
-                                        this.child(self.render_no_results(cx))
+                                    .map(|this| {
+                                        let this = this.child(
+                                            self.render_thread_navigation(
+                                                revealed_panel
+                                                    .as_ref()
+                                                    .map(|panel| panel.persistent_name()),
+                                                cx,
+                                            ),
+                                        );
+                                        if let Some(panel) = revealed_panel.as_ref() {
+                                            this.child(
+                                                div()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .child(panel.to_any()),
+                                            )
+                                        } else if no_open_projects {
+                                            this.child(self.render_empty_state(cx))
+                                        } else {
+                                            this.child(
+                                                v_flex()
+                                                    .relative()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        list(
+                                                            self.list_state.clone(),
+                                                            cx.processor(Self::render_list_entry),
+                                                        )
+                                                        .flex_1()
+                                                        .size_full(),
+                                                    )
+                                                    .when(no_search_results, |this| {
+                                                        this.child(self.render_no_results(cx))
+                                                    })
+                                                    .when_some(sticky_header, |this, header| {
+                                                        this.child(header)
+                                                    })
+                                                    .custom_scrollbars(
+                                                        Scrollbars::new(ScrollAxes::Vertical)
+                                                            .tracked_scroll_handle(
+                                                                &self.list_state,
+                                                            ),
+                                                        window,
+                                                        cx,
+                                                    ),
+                                            )
+                                        }
                                     })
-                                    .when_some(sticky_header, |this, header| this.child(header))
-                                    .custom_scrollbars(
-                                        Scrollbars::new(ScrollAxes::Vertical)
-                                            .tracked_scroll_handle(&self.list_state),
-                                        window,
-                                        cx,
-                                    ),
-                            )
-                        }
-                    }),
+                                    .child(self.render_account_bar(cx)),
+                            ),
+                    )
+                }
                 SidebarView::Archive(archive_view) => this.child(archive_view.clone()),
             })
             .map(|this| {
@@ -8011,7 +8590,10 @@ impl Render for Sidebar {
                     this.child(self.render_cross_channel_import_onboarding(verbose, cx))
                 })
             })
-            .child(self.render_sidebar_bottom_bar(cx))
+            .when(matches!(self.view, SidebarView::Archive(_)), |this| {
+                this.child(self.render_sidebar_bottom_bar(cx))
+                    .child(self.render_account_bar(cx))
+            })
     }
 }
 

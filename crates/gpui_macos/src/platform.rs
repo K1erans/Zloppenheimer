@@ -104,6 +104,10 @@ unsafe fn build_classes() {
                 sel!(handleGPUIMenuItem:),
                 handle_menu_item as extern "C" fn(&mut Object, Sel, id),
             );
+            decl.add_method(
+                sel!(openFromStatusItem:),
+                open_from_status_item as extern "C" fn(&mut Object, Sel, id),
+            );
             // Add menu item handlers so that OS save panels have the correct key commands
             decl.add_method(
                 sel!(cut:),
@@ -168,6 +172,18 @@ unsafe fn build_classes() {
 
 pub struct MacPlatform(Mutex<MacPlatformState>, MainThreadMarker);
 
+struct StatusItem(id);
+
+impl Drop for StatusItem {
+    fn drop(&mut self) {
+        unsafe {
+            let status_bar: id = msg_send![class!(NSStatusBar), systemStatusBar];
+            let _: () = msg_send![status_bar, removeStatusItem: self.0];
+            let _: () = msg_send![self.0, release];
+        }
+    }
+}
+
 pub(crate) struct MacPlatformState {
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
@@ -189,6 +205,7 @@ pub(crate) struct MacPlatformState {
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     finish_launching: Option<Box<dyn FnOnce()>>,
     dock_menu: Option<id>,
+    status_item: Option<StatusItem>,
     menus: Option<Vec<OwnedMenu>>,
     keyboard_mapper: Rc<MacKeyboardMapper>,
     /// Mirrors `[NSCursor setHiddenUntilMouseMoves:]` state, which AppKit doesn't expose.
@@ -234,6 +251,7 @@ impl MacPlatform {
             open_urls: None,
             finish_launching: None,
             dock_menu: None,
+            status_item: None,
             on_keyboard_layout_change: None,
             on_thermal_state_change: None,
             on_system_wake: None,
@@ -1067,6 +1085,35 @@ impl Platform for MacPlatform {
         self.0.lock().menus.clone()
     }
 
+    fn set_status_item(&self, title: Option<&str>) -> Result<()> {
+        let mut state = self.0.lock();
+        if state.headless {
+            return Ok(());
+        }
+        let Some(title) = title else {
+            state.status_item = None;
+            return Ok(());
+        };
+        unsafe {
+            if state.status_item.is_none() {
+                let status_bar: id = msg_send![class!(NSStatusBar), systemStatusBar];
+                let item: id = msg_send![status_bar, statusItemWithLength: -1.0_f64];
+                anyhow::ensure!(!item.is_null(), "Could not create system menu bar item");
+                let item: id = msg_send![item, retain];
+                state.status_item = Some(StatusItem(item));
+            }
+            if let Some(item) = &state.status_item {
+                let button: id = msg_send![item.0, button];
+                anyhow::ensure!(!button.is_null(), "System menu bar item has no button");
+                let app: id = msg_send![APP_CLASS, sharedApplication];
+                let _: () = msg_send![button, setTitle: ns_string(title)];
+                let _: () = msg_send![button, setTarget: NSWindow::delegate(app)];
+                let _: () = msg_send![button, setAction: sel!(openFromStatusItem:)];
+            }
+        }
+        Ok(())
+    }
+
     fn set_dock_menu(&self, menu: Vec<MenuItem>, keymap: &Keymap) {
         unsafe {
             let app: id = msg_send![APP_CLASS, sharedApplication];
@@ -1340,6 +1387,35 @@ unsafe fn register_system_wake_observer(observer: id) {
             name: wake_name
             object: nil
         ];
+    }
+}
+
+extern "C" fn open_from_status_item(this: &mut Object, _: Sel, _: id) {
+    unsafe {
+        let app: id = msg_send![APP_CLASS, sharedApplication];
+        let _: () = msg_send![app, activateIgnoringOtherApps: YES];
+        let windows: id = msg_send![app, windows];
+        let mut has_open_windows = false;
+        for index in 0..windows.count() {
+            let window = windows.objectAtIndex(index);
+            let visible: BOOL = msg_send![window, isVisible];
+            let minimized: BOOL = msg_send![window, isMiniaturized];
+            let can_become_key: BOOL = msg_send![window, canBecomeKeyWindow];
+            if can_become_key == YES && (visible == YES || minimized == YES) {
+                if minimized == YES {
+                    let _: () = msg_send![window, deminiaturize: nil];
+                }
+                let _: () = msg_send![window, makeKeyAndOrderFront: nil];
+                has_open_windows = true;
+                break;
+            }
+        }
+        should_handle_reopen(
+            this,
+            sel!(applicationShouldHandleReopen:hasVisibleWindows:),
+            app,
+            has_open_windows,
+        );
     }
 }
 

@@ -25,7 +25,7 @@ use editor::{
 use futures::{FutureExt as _, future::join_all};
 use gpui::{
     AppContext, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, Image, ImageFormat, KeyContext, SharedString, Subscription, Task, TaskExt,
+    Focusable, Image, ImageFormat, KeyContext, Pixels, SharedString, Subscription, Task, TaskExt,
     TextStyle, WeakEntity,
 };
 use language::{Buffer, language_settings::InlayHintKind};
@@ -200,6 +200,7 @@ impl PromptCompletionProviderDelegate for MessageEditorCompletionDelegate {
 }
 
 pub struct MessageEditor {
+    text_layout: Option<(Pixels, Pixels)>,
     mention_set: Entity<MentionSet>,
     editor: Entity<Editor>,
     workspace: WeakEntity<Workspace>,
@@ -603,6 +604,7 @@ impl MessageEditor {
 
         Self {
             editor,
+            text_layout: None,
             mention_set,
             workspace,
             session_capabilities,
@@ -1902,6 +1904,18 @@ impl MessageEditor {
         });
     }
 
+    pub fn set_text_layout(
+        &mut self,
+        font_size: Pixels,
+        line_height: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        if self.text_layout != Some((font_size, line_height)) {
+            self.text_layout = Some((font_size, line_height));
+            cx.notify();
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |editor, cx| {
@@ -2019,19 +2033,26 @@ impl Render for MessageEditor {
 
                 let text_style = TextStyle {
                     color: cx.theme().colors().text,
-                    font_family: settings.agent_buffer_font_family().clone(),
-                    font_fallbacks: settings.buffer_font.fallbacks.clone(),
-                    font_features: settings.buffer_font.features.clone(),
-                    font_size: settings.agent_buffer_font_size(cx).into(),
-                    font_weight: settings.buffer_font.weight,
-                    line_height: relative(settings.buffer_line_height.value()),
+                    font_family: settings.agent_ui_font_family().clone(),
+                    font_fallbacks: settings.ui_font.fallbacks.clone(),
+                    font_features: settings.ui_font.features.clone(),
+                    font_size: self
+                        .text_layout
+                        .map(|(font_size, _)| font_size)
+                        .unwrap_or_else(|| settings.agent_ui_font_size(cx))
+                        .into(),
+                    font_weight: settings.ui_font.weight,
+                    line_height: self
+                        .text_layout
+                        .map(|(_, line_height)| line_height.into())
+                        .unwrap_or_else(|| relative(settings.buffer_line_height.value())),
                     ..Default::default()
                 };
 
                 EditorElement::new(
                     &self.editor,
                     EditorStyle {
-                        background: cx.theme().colors().editor_background,
+                        background: gpui::transparent_black(),
                         local_player: cx.theme().players().local(),
                         text: text_style,
                         syntax: cx.theme().syntax().clone(),

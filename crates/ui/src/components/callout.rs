@@ -1,4 +1,4 @@
-use gpui::AnyElement;
+use gpui::{AnyElement, Hsla};
 
 use crate::prelude::*;
 
@@ -35,6 +35,7 @@ pub struct Callout {
     dismiss_action: Option<AnyElement>,
     line_height: Option<Pixels>,
     border_position: CalloutBorderPosition,
+    card_title_color: Option<Hsla>,
 }
 
 impl Callout {
@@ -50,6 +51,7 @@ impl Callout {
             dismiss_action: None,
             line_height: None,
             border_position: CalloutBorderPosition::Top,
+            card_title_color: None,
         }
     }
 
@@ -109,10 +111,71 @@ impl Callout {
         self.border_position = border_position;
         self
     }
+
+    pub fn conversation_card(mut self, title_color: Hsla) -> Self {
+        self.card_title_color = Some(title_color);
+        self
+    }
 }
 
 impl RenderOnce for Callout {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        if let Some(title_color) = self.card_title_color {
+            return v_flex()
+                .group("conversation-callout")
+                .w_full()
+                .min_w_0()
+                .p(px(18.))
+                .gap(px(10.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(gpui::rgb(0x484452))
+                .bg(gpui::rgb(0x292B37))
+                .child(
+                    h_flex()
+                        .relative()
+                        .w_full()
+                        .gap(px(8.))
+                        .when_some(self.title, |this, title| {
+                            this.child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(14.))
+                                    .line_height(px(20.))
+                                    .text_color(title_color)
+                                    .child(title),
+                            )
+                        })
+                        .when_some(self.dismiss_action, |this, dismiss| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .visible_on_hover("conversation-callout")
+                                    .child(dismiss),
+                            )
+                        }),
+                )
+                .map(|this| {
+                    let description = div()
+                        .min_w_0()
+                        .w_full()
+                        .text_size(px(13.))
+                        .line_height(px(20.))
+                        .text_color(gpui::rgb(0xB0B3C5));
+                    if let Some(content) = self.description_slot {
+                        this.child(description.child(content))
+                    } else if let Some(content) = self.description {
+                        this.child(description.child(content))
+                    } else {
+                        this
+                    }
+                })
+                .when_some(self.actions_slot, |this, actions| {
+                    this.child(h_flex().pt(px(4.)).gap(px(8.)).flex_wrap().child(actions))
+                });
+        }
         let line_height = self.line_height.unwrap_or(window.line_height());
 
         let has_actions = self.actions_slot.is_some() || self.dismiss_action.is_some();

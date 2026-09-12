@@ -1533,6 +1533,7 @@ impl AllAgentServersSettings {
 pub enum CustomAgentServerSettings {
     Custom {
         command: AgentServerCommand,
+        working_directory: Option<PathBuf>,
         /// The default mode to use for this agent.
         ///
         /// Note: Not only all agents support modes.
@@ -1627,12 +1628,14 @@ impl From<settings::CustomAgentServerSettings> for CustomAgentServerSettings {
         match value {
             settings::CustomAgentServerSettings::Custom {
                 path,
+                working_directory,
                 args,
                 env,
                 default_mode,
                 default_config_options,
                 favorite_config_option_values,
             } => CustomAgentServerSettings::Custom {
+                working_directory: working_directory.map(|path| PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).as_ref())),
                 command: AgentServerCommand {
                     path: PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).as_ref()),
                     args,
@@ -1664,6 +1667,7 @@ impl settings::Settings for AllAgentServersSettings {
             agent_settings
                 .0
                 .into_iter()
+                .filter(|(id, _)| !content.agent.as_ref().is_some_and(|agent| agent.disabled_servers.contains(id)))
                 .map(|(k, v)| {
                     (
                         EXTENSION_TO_REGISTRY_IDS

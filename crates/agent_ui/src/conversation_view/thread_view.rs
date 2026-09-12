@@ -31,9 +31,9 @@ use crate::ui::{
 use crate::unicode_confusables;
 
 use db::kvp::KeyValueStore;
-use gpui::List;
 use gpui::Stateful;
 use gpui::TaskExt;
+use gpui::{List, rgb};
 use heapless::Vec as ArrayVec;
 use language_model::{
     FastModeConfirmation, LanguageModel, LanguageModelEffortLevel, LanguageModelId,
@@ -584,6 +584,8 @@ pub struct ThreadView {
     pub profile_selector: Option<Entity<ProfileSelector>>,
     pub permission_dropdown_handle: PopoverMenuHandle<ContextMenu>,
     pub thread_retry_status: Option<RetryStatus>,
+    pub response_cancelled: bool,
+    composer_has_messages: Option<bool>,
     pub(super) thread_error: Option<ThreadError>,
     pub thread_error_markdown: Option<Entity<Markdown>>,
     pub token_limit_callout_dismissed: bool,
@@ -635,7 +637,7 @@ pub struct ThreadView {
     sandbox_status_key: Option<SandboxStatusKey>,
     pending_sandbox_status_key: Option<SandboxStatusKey>,
     pub multi_root_callout_dismissed: bool,
-    pub generating_indicator_in_list: bool,
+    pub status_indicator_in_list: bool,
     pub skill_loading_issues: Vec<SkillLoadingIssue>,
     /// Issues the user has explicitly dismissed. Each entry is matched against
     /// emitted issues by full equality; when an issue no longer appears in the
@@ -802,9 +804,6 @@ impl ThreadView {
         let session_id = thread.read(cx).session_id().clone();
         let parent_session_id = thread.read(cx).parent_session_id().cloned();
 
-        let has_slash_completions = session_capabilities.read().has_slash_completions();
-        let placeholder = placeholder_text(agent_display_name.as_ref(), has_slash_completions);
-
         let mut should_auto_submit = false;
         let mut show_external_source_prompt_warning = false;
 
@@ -815,7 +814,7 @@ impl ThreadView {
                 thread_store,
                 session_capabilities.clone(),
                 agent_id.clone(),
-                &placeholder,
+                MESSAGE_EDITOR_PLACEHOLDER,
                 editor::EditorMode::AutoHeight {
                     min_lines: AgentSettings::get_global(cx).message_editor_min_lines,
                     max_lines: Some(AgentSettings::get_global(cx).set_message_editor_max_lines()),
@@ -1004,6 +1003,8 @@ impl ThreadView {
             _subscriptions: subscriptions,
             permission_dropdown_handle: PopoverMenuHandle::default(),
             thread_retry_status: None,
+            response_cancelled: false,
+            composer_has_messages: None,
             thread_error: None,
             thread_error_markdown: None,
             token_limit_callout_dismissed: false,
@@ -1045,14 +1046,14 @@ impl ThreadView {
             sandbox_status_key: None,
             pending_sandbox_status_key: None,
             multi_root_callout_dismissed: false,
-            generating_indicator_in_list: false,
+            status_indicator_in_list: false,
             skill_loading_issues: Vec::new(),
             dismissed_skill_loading_issues: HashSet::default(),
             thread_search_bar: None,
             thread_search_visible: false,
         };
 
-        this.sync_generating_indicator(cx);
+        this.sync_status_indicator(cx);
         this.sync_editor_mode(cx);
         this.sync_existing_elicitation_states(window, cx);
         let list_state_for_scroll = this.list_state.clone();
@@ -1761,7 +1762,7 @@ impl ThreadView {
             })?;
 
             let _ = this.update(cx, |this, cx| {
-                this.sync_generating_indicator(cx);
+                this.sync_status_indicator(cx);
                 cx.notify();
             });
 
@@ -1858,6 +1859,8 @@ impl ThreadView {
         let error = error.into();
         self.emit_thread_error_telemetry(&error, cx);
         self.thread_error = Some(error);
+        self.response_cancelled = false;
+        self.sync_status_indicator(cx);
         cx.notify();
     }
 
@@ -1974,12 +1977,13 @@ impl ThreadView {
         self.thread_error.take();
         self.message_queue.pause();
         self._cancel_task = Some(self.thread.update(cx, |thread, cx| thread.cancel(cx)));
-        self.sync_generating_indicator(cx);
+        self.sync_status_indicator(cx);
         cx.notify();
     }
 
     pub fn retry_generation(&mut self, cx: &mut Context<Self>) {
         self.thread_error.take();
+        self.response_cancelled = false;
 
         let thread = &self.thread;
         if !thread.read(cx).can_retry(cx) {
@@ -1988,7 +1992,7 @@ impl ThreadView {
 
         let task = thread.update(cx, |thread, cx| thread.retry(cx));
         cx.emit(AcpThreadViewEvent::Interacted);
-        self.sync_generating_indicator(cx);
+        self.sync_status_indicator(cx);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -2974,6 +2978,7 @@ impl ThreadView {
         self.thread_error = None;
         self.thread_error_markdown = None;
         self.token_limit_callout_dismissed = true;
+        self.sync_status_indicator(cx);
         cx.notify();
     }
 
@@ -3022,6 +3027,7 @@ impl ThreadView {
         if let Some(fallback_model) = acp_thread::refusal_fallback_model_from_meta(&state.meta) {
             return Some(
                 Callout::new()
+                    .conversation_card(rgb(0xC9B7DD).into())
                     .icon(IconName::Warning)
                     .severity(Severity::Warning)
                     .title(state.last_error.clone())
@@ -3032,6 +3038,7 @@ impl ThreadView {
                             .tooltip(Tooltip::text("Dismiss"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.thread_retry_status = None;
+                                this.sync_status_indicator(cx);
                                 cx.notify();
                             })),
                     ),
@@ -3067,11 +3074,15 @@ impl ThreadView {
 
         Some(
             Callout::new()
-                .border_position(self.callout_border_position())
+                .conversation_card(rgb(0xC9B7DD).into())
                 .icon(IconName::Warning)
                 .severity(Severity::Warning)
-                .title(state.last_error.clone())
-                .description(retry_message),
+                .title("Retrying response…")
+                .description(format!("{}\n{}", state.last_error, retry_message))
+                .actions_slot(
+                    Self::response_action_button("stop-retry", "Stop", true)
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_generation(cx))),
+                ),
         )
     }
 
@@ -3086,342 +3097,283 @@ impl ThreadView {
         window: &mut Window,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
-        let thread = self.thread.read(cx);
-        let action_log = thread.action_log();
-        let telemetry = ActionLogTelemetry::from(thread);
-        let changed_buffers = action_log.read(cx).changed_buffers(cx).collect::<Vec<_>>();
-        let plan = thread.plan();
+        let plan = self.thread.read(cx).plan();
         let queue_is_empty = !self.has_queued_messages();
-
-        let awaiting_permission = self
+        let permission = self
             .render_main_agent_awaiting_permission(window, cx)
             .or_else(|| self.render_subagents_awaiting_permission(cx));
-        let has_awaiting_permission = awaiting_permission.is_some();
-
-        if changed_buffers.is_empty()
-            && plan.is_empty()
-            && queue_is_empty
-            && !has_awaiting_permission
-        {
+        if plan.is_empty() && queue_is_empty && permission.is_none() {
             return None;
         }
-
-        // Temporarily always enable ACP edit controls. This is temporary, to lessen the
-        // impact of a nasty bug that causes them to sometimes be disabled when they shouldn't
-        // be, which blocks you from being able to accept or reject edits. This switches the
-        // bug to be that sometimes it's enabled when it shouldn't be, which at least doesn't
-        // block you from using the panel.
-        let pending_edits = false;
-
-        let plan_expanded = self.plan_expanded;
-        let edits_expanded = self.edits_expanded;
-        let queue_expanded = self.queue_expanded;
-
-        let max_content_width = AgentSettings::get_global(cx).max_content_width;
-        // Drop shadows have no opaque surface to blend into on a transparent
-        // window, so they render as a dark halo; only apply them when opaque.
-        let opaque_window =
-            cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
-
-        h_flex()
-            .w_full()
-            .px_2()
-            .justify_center()
-            .child(
-                v_flex()
-                    .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
-                    .when(max_content_width.is_none(), |this| this.w_full())
-                    .flex_shrink_1()
-                    .flex_grow_0()
-                    .max_w_full()
-                    .bg(self.activity_bar_bg(cx))
-                    .border_1()
-                    .border_b_0()
-                    .border_color(cx.theme().colors().border)
-                    .rounded_t_md()
-                    .when(opaque_window, |this| {
-                        this.shadow(vec![
-                            gpui::BoxShadow::new(px(1.), px(-1.), gpui::black().opacity(0.12))
-                                .blur_radius(px(2.)),
-                        ])
-                    })
-                    .when_some(awaiting_permission, |this, element| this.child(element))
-                    .when(
-                        has_awaiting_permission
-                            && (!plan.is_empty() || !changed_buffers.is_empty() || !queue_is_empty),
-                        |this| this.child(Divider::horizontal().color(DividerColor::Border)),
-                    )
-                    .when(!plan.is_empty(), |this| {
-                        this.child(self.render_plan_summary(plan, window, cx))
-                            .when(plan_expanded, |parent| {
-                                parent.child(self.render_plan_entries(plan, window, cx))
-                            })
-                    })
-                    .when(!plan.is_empty() && !changed_buffers.is_empty(), |this| {
-                        this.child(Divider::horizontal().color(DividerColor::Border))
-                    })
-                    .when(
-                        !changed_buffers.is_empty() && thread.parent_session_id().is_none(),
-                        |this| {
-                            this.child(self.render_edits_summary(
-                                &changed_buffers,
-                                edits_expanded,
-                                pending_edits,
-                                cx,
-                            ))
-                            .when(edits_expanded, |parent| {
-                                parent.child(self.render_edited_files(
-                                    action_log,
-                                    telemetry.clone(),
-                                    &changed_buffers,
-                                    pending_edits,
-                                    cx,
-                                ))
-                            })
-                        },
-                    )
-                    .when(!queue_is_empty, |this| {
-                        this.when(!plan.is_empty() || !changed_buffers.is_empty(), |this| {
-                            this.child(Divider::horizontal().color(DividerColor::Border))
-                        })
-                        .child(self.render_message_queue_summary(window, cx))
-                        .when(queue_expanded, |parent| {
-                            parent.child(self.render_message_queue_entries(window, cx))
-                        })
-                    }),
-            )
-            .into_any()
-            .into()
-    }
-
-    fn render_edited_files(
-        &self,
-        action_log: &Entity<ActionLog>,
-        telemetry: ActionLogTelemetry,
-        changed_buffers: &[(Entity<Buffer>, Entity<BufferDiff>)],
-        pending_edits: bool,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let editor_bg_color = cx.theme().colors().editor_background;
-
-        // Sort edited files alphabetically for consistency with Git diff view
-        let mut sorted_buffers: Vec<_> = changed_buffers.iter().collect();
-        sorted_buffers.sort_by(|(buffer_a, _), (buffer_b, _)| {
-            let path_a = buffer_a.read(cx).file().map(|f| f.path().clone());
-            let path_b = buffer_b.read(cx).file().map(|f| f.path().clone());
-            path_a.cmp(&path_b)
-        });
-
-        v_flex()
-            .id("edited_files_list")
-            .max_h_40()
-            .overflow_y_scroll()
-            .child(
-                v_flex().children(sorted_buffers.into_iter().enumerate().flat_map(
-                    |(index, (buffer, diff))| {
-                        let file = buffer.read(cx).file()?;
-                        let path = file.path();
-                        let path_style = file.path_style(cx);
-                        let separator = file.path_style(cx).primary_separator();
-
-                        let fallback_full_path =
-                            full_path_for_empty_project_path(file.as_ref(), cx);
-
-                        let file_path = path.parent().and_then(|parent| {
-                            if parent.is_empty() {
-                                None
-                            } else {
-                                Some(
-                                    Label::new(format!(
-                                        "{}{separator}",
-                                        parent.display(path_style)
-                                    ))
-                                    .color(Color::Muted)
-                                    .size(LabelSize::XSmall)
-                                    .buffer_font(cx),
-                                )
-                            }
-                        });
-
-                        let file_name = path
-                            .file_name()
-                            .map(|name| {
-                                Label::new(name.to_string())
-                                    .size(LabelSize::XSmall)
-                                    .buffer_font(cx)
-                                    .ml_1()
-                            })
-                            .or_else(|| {
-                                fallback_full_path.as_ref().map(|path| {
-                                    Label::new(path.clone())
-                                        .size(LabelSize::XSmall)
-                                        .buffer_font(cx)
-                                        .ml_1()
+        Some(
+            h_flex()
+                .w_full()
+                .px_2()
+                .justify_center()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .when_some(
+                            AgentSettings::get_global(cx).max_content_width,
+                            |this, width| this.max_w(width),
+                        )
+                        .bg(self.activity_bar_bg(cx))
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .rounded_t_md()
+                        .children(permission)
+                        .when(!plan.is_empty(), |this| {
+                            this.child(self.render_plan_summary(plan, window, cx))
+                                .when(self.plan_expanded, |this| {
+                                    this.child(self.render_plan_entries(plan, window, cx))
                                 })
-                            });
-
-                        let full_path = fallback_full_path
-                            .unwrap_or_else(|| path.display(path_style).to_string());
-
-                        let file_icon = FileIcons::get_icon(path.as_std_path(), cx)
-                            .map(Icon::from_path)
-                            .map(|icon| icon.color(Color::Muted).size(IconSize::Small))
-                            .unwrap_or_else(|| {
-                                Icon::new(IconName::File)
-                                    .color(Color::Muted)
-                                    .size(IconSize::Small)
-                            });
-
-                        let file_stats = DiffStats::single_file(diff.read(cx));
-
-                        let buttons = self.render_edited_files_buttons(
-                            index,
-                            buffer,
-                            action_log,
-                            &telemetry,
-                            pending_edits,
-                            editor_bg_color,
-                            cx,
-                        );
-
-                        let element = h_flex()
-                            .group("edited-code")
-                            .id(("file-container", index))
-                            .relative()
-                            .min_w_0()
-                            .p_1p5()
-                            .gap_2()
-                            .justify_between()
-                            .bg(editor_bg_color)
-                            .when(index < changed_buffers.len() - 1, |parent| {
-                                parent.border_color(cx.theme().colors().border).border_b_1()
-                            })
-                            .child(
-                                h_flex()
-                                    .id(("file-name-path", index))
-                                    .cursor_pointer()
-                                    .pr_0p5()
-                                    .gap_0p5()
-                                    .rounded_xs()
-                                    .child(file_icon)
-                                    .children(file_name)
-                                    .children(file_path)
-                                    .child(
-                                        DiffStat::new(
-                                            "file",
-                                            file_stats.lines_added as usize,
-                                            file_stats.lines_removed as usize,
-                                        )
-                                        .label_size(LabelSize::XSmall),
-                                    )
-                                    .hover(|s| s.bg(cx.theme().colors().element_hover))
-                                    .tooltip({
-                                        move |_, cx| {
-                                            Tooltip::with_meta(
-                                                "Go to File",
-                                                None,
-                                                full_path.clone(),
-                                                cx,
-                                            )
-                                        }
-                                    })
-                                    .on_click({
-                                        let buffer = buffer.clone();
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.open_edited_buffer(&buffer, window, cx);
-                                        })
-                                    }),
-                            )
-                            .child(buttons);
-
-                        Some(element)
-                    },
-                )),
-            )
-            .into_any_element()
+                        })
+                        .when(!queue_is_empty, |this| {
+                            this.child(self.render_message_queue_summary(window, cx))
+                                .when(self.queue_expanded, |this| {
+                                    this.child(self.render_message_queue_entries(window, cx))
+                                })
+                        }),
+                )
+                .into_any_element(),
+        )
     }
 
-    fn render_edited_files_buttons(
+    fn render_edited_files(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let thread = self.thread.read(cx);
+        if thread.parent_session_id().is_some() {
+            return None;
+        }
+        let mut buffers = thread
+            .action_log()
+            .read(cx)
+            .changed_buffers(cx)
+            .collect::<Vec<_>>();
+        if buffers.is_empty() {
+            return None;
+        }
+        buffers.sort_by_key(|(buffer, _)| buffer.read(cx).file().map(|file| file.path().clone()));
+        let stats = DiffStats::all_files(buffers.iter().cloned(), cx);
+        let generating = thread.status() == ThreadStatus::Generating;
+        let open_buffers = buffers
+            .iter()
+            .map(|(buffer, _)| buffer.clone())
+            .collect::<Vec<_>>();
+        let rows = buffers
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, (buffer, diff))| {
+                let file = buffer.read(cx).file()?;
+                let name = file
+                    .path()
+                    .file_name()
+                    .map(str::to_owned)
+                    .or_else(|| full_path_for_empty_project_path(file.as_ref(), cx))
+                    .unwrap_or_default();
+                let directory = file
+                    .path()
+                    .parent()
+                    .map(|path| path.display(file.path_style(cx)).to_string())
+                    .unwrap_or_default();
+                let stats = DiffStats::single_file(diff.read(cx));
+                let view_buffer = buffer.clone();
+                Some(
+                    h_flex()
+                        .h(px(39.))
+                        .px(px(16.))
+                        .gap(px(12.))
+                        .border_b_1()
+                        .border_color(rgb(0x383B48))
+                        .child(
+                            Icon::new(IconName::File)
+                                .size(IconSize::Custom(rems_from_px(16_f32)))
+                                .color(Color::Custom(rgb(0xACB0C2).into())),
+                        )
+                        .child(
+                            div()
+                                .w(px(173.))
+                                .min_w_0()
+                                .text_size(px(12.))
+                                .line_height(px(18.))
+                                .text_color(rgb(0xD5D7E2))
+                                .truncate()
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(11.))
+                                .line_height(px(16.))
+                                .text_color(rgb(0x9498AB))
+                                .truncate()
+                                .child(directory),
+                        )
+                        .child(
+                            DiffStat::new(
+                                ("edited-file-stat", index),
+                                stats.lines_added as usize,
+                                stats.lines_removed as usize,
+                            )
+                            .label_size(LabelSize::Custom(rems_from_px(12_f32))),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(6.))
+                                .child(
+                                    ButtonLike::new(("view-edited-file", index))
+                                        .size(ButtonSize::None)
+                                        .height(px(25.).into())
+                                        .corner_radius(px(5.))
+                                        .custom_style(|this| {
+                                            this.px(px(9.)).border_1().border_color(rgb(0x454957))
+                                        })
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .line_height(px(16.))
+                                                .child("View file"),
+                                        )
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.open_changed_file(&view_buffer, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    ButtonLike::new(("view-edited-diff", index))
+                                        .size(ButtonSize::None)
+                                        .height(px(25.).into())
+                                        .corner_radius(px(5.))
+                                        .background(rgb(0x393142).into())
+                                        .custom_style(|this| {
+                                            this.px(px(9.)).border_1().border_color(rgb(0x544A60))
+                                        })
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .line_height(px(16.))
+                                                .child("View diff"),
+                                        )
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.open_edited_buffer(&buffer, window, cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element(),
+                )
+            })
+            .collect::<Vec<_>>();
+        Some(
+            v_flex()
+                .w_full()
+                .mb(px(12.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(rgb(0x414451))
+                .bg(rgb(0x262933))
+                .overflow_hidden()
+                .child(
+                    h_flex()
+                        .h(px(39.))
+                        .px(px(16.))
+                        .gap(px(10.))
+                        .border_b_1()
+                        .border_color(rgb(0x383B48))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .text_color(rgb(0xDFDFE8))
+                                .child(if generating {
+                                    "Files edited so far"
+                                } else {
+                                    "Files edited"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(18.))
+                                .text_color(rgb(0xA8ACBD))
+                                .child(format!("{} files", rows.len())),
+                        )
+                        .child(
+                            DiffStat::new(
+                                "edited-files-total",
+                                stats.lines_added as usize,
+                                stats.lines_removed as usize,
+                            )
+                            .label_size(LabelSize::Custom(rems_from_px(12_f32))),
+                        ),
+                )
+                .children(rows)
+                .child(
+                    h_flex()
+                        .h(px(49.))
+                        .px(px(12.))
+                        .justify_between()
+                        .child(
+                            ButtonLike::new("view-thread-changes")
+                                .size(ButtonSize::None)
+                                .height(px(28.).into())
+                                .corner_radius(px(5.))
+                                .background(rgb(0x41364E).into())
+                                .custom_style(|this| {
+                                    this.px(px(12.)).border_1().border_color(rgb(0x5A4C65))
+                                })
+                                .child(div().text_size(px(12.)).line_height(px(16.)).child(
+                                    if generating {
+                                        "View changes so far"
+                                    } else {
+                                        "View changes"
+                                    },
+                                ))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(OpenAgentDiff.boxed_clone(), cx)
+                                }),
+                        )
+                        .child(
+                            ButtonLike::new("open-all-edited-files")
+                                .size(ButtonSize::None)
+                                .height(px(28.).into())
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .line_height(px(16.))
+                                        .text_color(rgb(0xA8ACBD))
+                                        .child("Open all files ↗"),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    for buffer in &open_buffers {
+                                        this.open_changed_file(buffer, window, cx);
+                                    }
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn open_changed_file(
         &self,
-        index: usize,
         buffer: &Entity<Buffer>,
-        action_log: &Entity<ActionLog>,
-        telemetry: &ActionLogTelemetry,
-        pending_edits: bool,
-        editor_bg_color: Hsla,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        h_flex()
-            .id("edited-buttons-container")
-            .visible_on_hover("edited-code")
-            .absolute()
-            .right_0()
-            .px_1()
-            .gap_1()
-            .bg(editor_bg_color)
-            .on_hover(cx.listener(move |this, is_hovered, _window, cx| {
-                if *is_hovered {
-                    this.hovered_edited_file_buttons = Some(index);
-                } else if this.hovered_edited_file_buttons == Some(index) {
-                    this.hovered_edited_file_buttons = None;
-                }
-                cx.notify();
-            }))
-            .child(
-                Button::new("review", "Review")
-                    .label_size(LabelSize::Small)
-                    .on_click({
-                        let buffer = buffer.clone();
-                        cx.listener(move |this, _, window, cx| {
-                            this.open_edited_buffer(&buffer, window, cx);
-                        })
-                    }),
-            )
-            .child(
-                Button::new(("reject-file", index), "Reject")
-                    .label_size(LabelSize::Small)
-                    .disabled(pending_edits)
-                    .on_click({
-                        let buffer = buffer.clone();
-                        let action_log = action_log.clone();
-                        let telemetry = telemetry.clone();
-                        move |_, _, cx| {
-                            action_log.update(cx, |action_log, cx| {
-                                action_log
-                                    .reject_edits_in_ranges(
-                                        buffer.clone(),
-                                        vec![Anchor::min_max_range_for_buffer(
-                                            buffer.read(cx).remote_id(),
-                                        )],
-                                        Some(telemetry.clone()),
-                                        cx,
-                                    )
-                                    .0
-                                    .detach_and_log_err(cx);
-                            })
-                        }
-                    }),
-            )
-            .child(
-                Button::new(("keep-file", index), "Keep")
-                    .label_size(LabelSize::Small)
-                    .disabled(pending_edits)
-                    .on_click({
-                        let buffer = buffer.clone();
-                        let action_log = action_log.clone();
-                        let telemetry = telemetry.clone();
-                        move |_, _, cx| {
-                            action_log.update(cx, |action_log, cx| {
-                                action_log.keep_edits_in_range(
-                                    buffer.clone(),
-                                    Anchor::min_max_range_for_buffer(buffer.read(cx).remote_id()),
-                                    Some(telemetry.clone()),
-                                    cx,
-                                );
-                            })
-                        }
-                    }),
-            )
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.open_project_item::<Editor>(
+                    None,
+                    buffer.clone(),
+                    true,
+                    true,
+                    false,
+                    false,
+                    window,
+                    cx,
+                );
+            })
+            .log_err();
     }
 
     fn collect_subagent_items_for_sessions(
@@ -4076,147 +4028,6 @@ impl ThreadView {
         cx.notify();
     }
 
-    fn render_edits_summary(
-        &self,
-        changed_buffers: &[(Entity<Buffer>, Entity<BufferDiff>)],
-        expanded: bool,
-        pending_edits: bool,
-        cx: &Context<Self>,
-    ) -> Div {
-        const EDIT_NOT_READY_TOOLTIP_LABEL: &str = "Wait until file edits are complete.";
-
-        let focus_handle = self.focus_handle(cx);
-
-        h_flex()
-            .p_1()
-            .justify_between()
-            .flex_wrap()
-            .when(expanded, |this| {
-                this.border_b_1().border_color(cx.theme().colors().border)
-            })
-            .child(
-                h_flex()
-                    .id("edits-container")
-                    .cursor_pointer()
-                    .gap_1()
-                    .child(Disclosure::new("edits-disclosure", expanded))
-                    .map(|this| {
-                        if pending_edits {
-                            this.child(
-                                Label::new(format!(
-                                    "Editing {} {}…",
-                                    changed_buffers.len(),
-                                    if changed_buffers.len() == 1 {
-                                        "file"
-                                    } else {
-                                        "files"
-                                    }
-                                ))
-                                .color(Color::Muted)
-                                .size(LabelSize::Small)
-                                .with_animation(
-                                    "edit-label",
-                                    Animation::new(Duration::from_secs(2))
-                                        .repeat()
-                                        .with_easing(pulsating_between(0.3, 0.7)),
-                                    |label, delta| label.alpha(delta),
-                                ),
-                            )
-                        } else {
-                            let stats = DiffStats::all_files(changed_buffers.iter().cloned(), cx);
-                            let dot_divider = || {
-                                Label::new("•")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Disabled)
-                            };
-
-                            this.child(
-                                Label::new("Edits")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .child(dot_divider())
-                            .child(
-                                Label::new(format!(
-                                    "{} {}",
-                                    changed_buffers.len(),
-                                    if changed_buffers.len() == 1 {
-                                        "file"
-                                    } else {
-                                        "files"
-                                    }
-                                ))
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                            )
-                            .child(dot_divider())
-                            .child(DiffStat::new(
-                                "total",
-                                stats.lines_added as usize,
-                                stats.lines_removed as usize,
-                            ))
-                        }
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.edits_expanded = !this.edits_expanded;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        IconButton::new("review-changes", IconName::ListTodo)
-                            .icon_size(IconSize::Small)
-                            .tooltip({
-                                let focus_handle = focus_handle.clone();
-                                move |_window, cx| {
-                                    Tooltip::for_action_in(
-                                        "Review Changes",
-                                        &OpenAgentDiff,
-                                        &focus_handle,
-                                        cx,
-                                    )
-                                }
-                            })
-                            .on_click(cx.listener(|_, _, window, cx| {
-                                window.dispatch_action(OpenAgentDiff.boxed_clone(), cx);
-                            })),
-                    )
-                    .child(Divider::vertical().color(DividerColor::Border))
-                    .child(
-                        Button::new("reject-all-changes", "Reject All")
-                            .label_size(LabelSize::Small)
-                            .disabled(pending_edits)
-                            .when(pending_edits, |this| {
-                                this.tooltip(Tooltip::text(EDIT_NOT_READY_TOOLTIP_LABEL))
-                            })
-                            .key_binding(
-                                KeyBinding::for_action_in(&RejectAll, &focus_handle.clone(), cx)
-                                    .map(|kb| kb.size(rems_from_px(12_f32))),
-                            )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.reject_all(&RejectAll, window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("keep-all-changes", "Keep All")
-                            .label_size(LabelSize::Small)
-                            .disabled(pending_edits)
-                            .when(pending_edits, |this| {
-                                this.tooltip(Tooltip::text(EDIT_NOT_READY_TOOLTIP_LABEL))
-                            })
-                            .key_binding(
-                                KeyBinding::for_action_in(&KeepAll, &focus_handle, cx)
-                                    .map(|kb| kb.size(rems_from_px(12_f32))),
-                            )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.keep_all(&KeepAll, window, cx);
-                            })),
-                    ),
-            )
-    }
-
     fn is_subagent_canceled_or_failed(&self, cx: &App) -> bool {
         let Some(parent_session_id) = self.parent_session_id.as_ref() else {
             return false;
@@ -4328,6 +4139,87 @@ impl ThreadView {
         )
     }
 
+    fn render_checkout_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let project = self.project.upgrade()?;
+        let workspace = self.workspace.clone();
+        let label = if project.read(cx).is_local() {
+            "Local checkout"
+        } else {
+            "Remote checkout"
+        };
+        Some(
+            PopoverMenu::new("composer-checkout-menu")
+                .trigger_with_tooltip(
+                    Button::new("composer-checkout", label)
+                        .label_size(LabelSize::XSmall)
+                        .color(Color::Muted)
+                        .start_icon(Icon::new(IconName::Folder).size(IconSize::Small))
+                        .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                    Tooltip::text("Choose a workspace"),
+                )
+                .menu(move |window, cx| {
+                    let workspace = workspace.clone();
+                    Some(ContextMenu::build(window, cx, |menu, _, _| {
+                        menu.dropdown_style(px(280.))
+                            .header("Workspace")
+                            .item(ContextMenuEntry::new("Current checkout")
+                                .toggleable(IconPosition::End, true))
+                            .item(ContextMenuEntry::new("New worktree")
+                                .handler(move |window, cx| {
+                                    workspace.update(cx, |workspace, cx| {
+                                        git_ui_core::worktree_service::handle_create_worktree(
+                                            workspace,
+                                            &zed_actions::CreateWorktree {
+                                                worktree_name: None,
+                                                branch_target: zed_actions::NewWorktreeBranchTarget::CurrentBranch,
+                                            },
+                                            window,
+                                            None,
+                                            cx,
+                                        );
+                                    }).log_err();
+                                }))
+                    }))
+                })
+                .anchor(gpui::Anchor::BottomLeft)
+                .into_any_element(),
+        )
+    }
+
+    fn render_branch_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let project = self.project.upgrade()?;
+        let repository = project.read(cx).active_repository(cx)?;
+        let branch_name: SharedString = repository
+            .read(cx)
+            .branch
+            .as_ref()
+            .map(|branch| branch.name().to_string())
+            .unwrap_or_else(|| "Detached HEAD".to_string())
+            .into();
+        let workspace = self.workspace.clone();
+        Some(
+            PopoverMenu::new("composer-branch-menu")
+                .trigger_with_tooltip(
+                    Button::new("composer-branch", branch_name)
+                        .label_size(LabelSize::XSmall)
+                        .color(Color::Muted)
+                        .start_icon(Icon::new(IconName::GitBranch).size(IconSize::Small))
+                        .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                    Tooltip::text("Choose a branch"),
+                )
+                .menu(move |window, cx| {
+                    git_ui_core::build_composer_branch_picker(
+                        workspace.clone(),
+                        Some(repository.clone()),
+                        window,
+                        cx,
+                    )
+                })
+                .anchor(gpui::Anchor::BottomRight)
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn render_message_editor(
         &mut self,
         window: &mut Window,
@@ -4349,43 +4241,150 @@ impl ThreadView {
 
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         let has_messages = self.list_state.item_count() > 0;
-        let fills_container = !has_messages || editor_expanded;
+        if self.composer_has_messages != Some(has_messages) {
+            self.composer_has_messages = Some(has_messages);
+            self.message_editor.update(cx, |editor, cx| {
+                editor.set_text_layout(px(if has_messages { 16. } else { 18. }), px(28.), cx);
+                editor.set_placeholder_text(
+                    if has_messages {
+                        "Ask a follow-up…"
+                    } else {
+                        MESSAGE_EDITOR_PLACEHOLDER
+                    },
+                    window,
+                    cx,
+                );
+            });
+        }
+        let fills_container = editor_expanded;
+        let project_name = self
+            .project
+            .upgrade()
+            .and_then(|project| {
+                project
+                    .read(cx)
+                    .visible_worktrees(cx)
+                    .next()
+                    .map(|worktree| worktree.read(cx).root_name_str().to_string())
+            })
+            .unwrap_or_else(|| "Zloppenheimer".to_string());
 
-        h_flex()
-            .py_2()
+        let controls = [
+            self.render_checkout_picker(cx),
+            self.config_options_view
+                .clone()
+                .map(|view| view.into_any_element())
+                .or_else(|| {
+                    self.model_selector
+                        .clone()
+                        .map(|view| view.into_any_element())
+                }),
+            self.render_fast_mode_control(cx),
+            self.render_thinking_control(cx),
+            self.profile_selector
+                .clone()
+                .map(|view| view.into_any_element()),
+            self.mode_selector
+                .clone()
+                .filter(|_| self.config_options_view.is_none())
+                .map(|view| view.into_any_element()),
+        ]
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .flat_map(|(index, control)| {
+            let divider = (index > 0).then(|| {
+                div()
+                    .w(px(1.))
+                    .h(px(16.))
+                    .flex_none()
+                    .bg(gpui::rgb(0x494B5A))
+                    .into_any_element()
+            });
+            divider.into_iter().chain(std::iter::once(control))
+        })
+        .collect::<Vec<_>>();
+
+        v_flex()
+            .px(px(24.))
+            .py(px(16.))
             .bg(editor_bg_color)
             .justify_center()
+            .items_center()
+            .gap(px(26.))
             .on_action(cx.listener(Self::handle_message_editor_move_up))
             .map(|this| {
                 if has_messages {
-                    this.on_action(cx.listener(Self::expand_message_editor))
-                        .border_t_1()
-                        .border_color(cx.theme().colors().border)
+                    this.pt(px(8.))
+                        .pb(px(4.))
+                        .gap(px(12.))
+                        .on_action(cx.listener(Self::expand_message_editor))
                         .when(editor_expanded, |this| this.h(vh(0.8, window)))
                 } else {
-                    this.flex_1().size_full()
+                    this.flex_1().size_full().pt_0().pb(px(72.))
                 }
+            })
+            .when(!has_messages, |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .items_center()
+                        .gap(px(10.))
+                        .pb(px(6.))
+                        .child(
+                            div()
+                                .text_size(px(28.))
+                                .line_height(px(36.))
+                                .text_color(cx.theme().colors().text)
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child("What are we building?"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .line_height(px(22.))
+                                .text_color(cx.theme().colors().text_placeholder)
+                                .child(format!("Start a thread in {project_name}.")),
+                        ),
+                )
             })
             .child(
                 v_flex()
-                    .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
-                    .when(max_content_width.is_none(), |this| this.w_full())
+                    .w_full()
+                    .when_some(max_content_width, |this, max_w| this.max_w(max_w))
                     .min_w_0()
-                    .when(fills_container, |this| this.h_full())
-                    .px_2()
                     .flex_shrink_1()
                     .flex_grow_0()
+                    .when(fills_container, |this| this.flex_1().min_h_0())
                     .justify_between()
-                    .gap_2()
+                    .border_1()
+                    .border_color(cx.theme().colors().border_selected)
+                    .rounded(px(16.))
+                    .overflow_hidden()
+                    .bg(cx.theme().colors().elevated_surface_background)
                     .child(
                         v_flex()
                             .relative()
                             .w_full()
-                            .min_h_0()
+                            .min_h(px(94.))
                             .when(fills_container, |this| this.flex_1())
-                            .pt_1()
-                            .pr_2p5()
-                            .child(self.message_editor.clone())
+                            .p(px(24.))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .when(fills_container, |this| this.flex_1().min_h_0())
+                                    .items_start()
+                                    .gap(px(18.))
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .when(fills_container, |this| this.h_full())
+                                            .child(self.message_editor.clone()),
+                                    )
+                                    .child(self.render_add_context_button(cx))
+                                    .child(self.render_send_button(cx)),
+                            )
                             .when(has_messages, |this| {
                                 this.child(
                                     h_flex()
@@ -4423,6 +4422,13 @@ impl ThreadView {
                         h_flex()
                             .w_full()
                             .min_w_0()
+                            .min_h(px(52.))
+                            .px(px(16.))
+                            .py(px(8.))
+                            .border_t_1()
+                            .border_color(cx.theme().colors().border)
+                            .bg(cx.theme().colors().surface_background)
+                            .rounded_b(px(15.))
                             .flex_none()
                             .flex_wrap()
                             .justify_between()
@@ -4430,11 +4436,8 @@ impl ThreadView {
                                 h_flex()
                                     .min_w_0()
                                     .flex_wrap()
-                                    .gap_0p5()
-                                    .child(self.render_add_context_button(cx))
-                                    .child(self.render_follow_toggle(cx))
-                                    .children(self.render_fast_mode_control(cx))
-                                    .children(self.render_thinking_control(cx)),
+                                    .gap(px(12.))
+                                    .children(controls),
                             )
                             .child(
                                 h_flex()
@@ -4442,16 +4445,30 @@ impl ThreadView {
                                     .flex_wrap()
                                     .gap_1()
                                     .children(self.render_token_usage(cx))
-                                    .children(self.profile_selector.clone())
-                                    .map(|this| match self.config_options_view.clone() {
-                                        Some(config_view) => this.child(config_view),
-                                        None => this
-                                            .children(self.mode_selector.clone())
-                                            .children(self.model_selector.clone()),
+                                    .when(has_messages, |this| {
+                                        this.child(self.render_follow_toggle(cx))
                                     })
-                                    .child(self.render_send_button(cx)),
+                                    .children(self.render_branch_picker(cx)),
                             ),
                     ),
+            )
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .line_height(px(18.))
+                    .text_color(cx.theme().colors().text_muted)
+                    .map(|this| {
+                        if self.thread.read(cx).status() != ThreadStatus::Idle {
+                            this.child("Agent is working")
+                                .child("·")
+                                .child("Esc to stop")
+                        } else {
+                            this.child("Enter to send")
+                                .child("·")
+                                .child("Shift + Enter for a new line")
+                        }
+                    }),
             )
             .into_any()
     }
@@ -5240,16 +5257,17 @@ impl ThreadView {
             .find(|effort_level| effort_level.is_default)
             .cloned();
 
-        let selected = selected_effort.and_then(|effort| {
-            supported_effort_levels
-                .iter()
-                .find(|level| level.value == effort)
-                .cloned()
-        });
+        let selected = selected_effort
+            .and_then(|effort| {
+                supported_effort_levels
+                    .iter()
+                    .find(|level| level.value == effort)
+                    .cloned()
+            })
+            .or(default_effort_level);
 
         let label = selected
             .clone()
-            .or(default_effort_level)
             .map_or("Select Effort".into(), |effort| effort.name);
 
         let (label_color, icon) = if self.thinking_effort_menu_handle.is_deployed() {
@@ -5321,7 +5339,7 @@ impl ThreadView {
             )
             .menu(move |window, cx| {
                 Some(ContextMenu::build(window, cx, |mut menu, _window, _cx| {
-                    menu = menu.header("Change Thinking Effort");
+                    menu = menu.dropdown_style(px(330.)).header("Reasoning effort");
 
                     for effort_level in supported_effort_levels.clone() {
                         let is_selected = selected
@@ -5408,8 +5426,12 @@ impl ThreadView {
                 .into_any_element()
         } else if is_generating && is_editor_empty {
             IconButton::new("stop-generation", IconName::Stop)
-                .icon_color(Color::Error)
-                .style(ButtonStyle::Tinted(TintColor::Error))
+                .shape(ui::IconButtonShape::Circle)
+                .width(px(36.))
+                .size(ButtonSize::None)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Custom(cx.theme().colors().editor_background))
+                .background(cx.theme().colors().border_focused)
                 .tooltip(move |_window, cx| {
                     Tooltip::for_action("Stop Generation", &editor::actions::Cancel, cx)
                 })
@@ -5419,15 +5441,21 @@ impl ThreadView {
             let send_icon = if is_generating {
                 IconName::QueueMessage
             } else {
-                IconName::Send
+                IconName::ArrowUp
             };
             IconButton::new("send-message", send_icon)
+                .shape(ui::IconButtonShape::Circle)
+                .width(px(36.))
+                .icon_size(IconSize::Custom(rems_from_px(21_f32)))
+                .background(cx.theme().colors().border_focused)
+                .disabled_icon_color(Color::Custom(cx.theme().colors().editor_background))
+                .size(ButtonSize::None)
                 .style(ButtonStyle::Filled)
                 .map(|this| {
                     if is_editor_empty && !is_generating {
                         this.disabled(true).icon_color(Color::Muted)
                     } else {
-                        this.icon_color(Color::Accent)
+                        this.icon_color(Color::Custom(cx.theme().colors().editor_background))
                     }
                 })
                 .tooltip(move |_window, cx| {
@@ -5479,8 +5507,11 @@ impl ThreadView {
 
         PopoverMenu::new("add-context-menu")
             .trigger_with_tooltip(
-                IconButton::new("add-context", IconName::Plus)
-                    .icon_size(IconSize::Small)
+                IconButton::new("add-context", IconName::Paperclip)
+                    .size(ButtonSize::None)
+                    .width(px(32.))
+                    .height(px(36.).into())
+                    .icon_size(IconSize::Custom(rems_from_px(21_f32)))
                     .icon_color(Color::Muted),
                 {
                     move |_window, cx| {
@@ -6100,11 +6131,45 @@ impl ThreadView {
                 if let Some(entry) = entries.get(index) {
                     let rendered = this.render_entry(index, entries.len(), entry, window, cx);
                     centered_container(rendered.into_any_element()).into_any_element()
-                } else if this.generating_indicator_in_list {
+                } else if this.status_indicator_in_list {
+                    if let Some(error) = this.render_thread_error(window, cx) {
+                        return centered_container(
+                            div().pb(px(22.)).child(error).into_any_element(),
+                        )
+                        .into_any_element();
+                    }
+                    if let Some(retry) = this.render_thread_retry_status_callout(cx) {
+                        return centered_container(
+                            div().pb(px(22.)).child(retry).into_any_element(),
+                        )
+                        .into_any_element();
+                    }
+                    if this.response_cancelled {
+                        return centered_container(
+                            div()
+                                .pb(px(22.))
+                                .child(this.render_cancelled_response(cx))
+                                .into_any_element(),
+                        )
+                        .into_any_element();
+                    }
+                    let edited_files = this.render_edited_files(cx);
+                    if this.thread.read(cx).status() != ThreadStatus::Generating {
+                        return centered_container(
+                            v_flex().children(edited_files).into_any_element(),
+                        )
+                        .into_any_element();
+                    }
                     let confirmation = this.thread.read(cx).is_waiting_for_confirmation()
                         || this.has_pending_request_elicitation(cx);
                     let rendered = this.render_generating(confirmation, cx);
-                    centered_container(rendered.into_any_element()).into_any_element()
+                    centered_container(
+                        v_flex()
+                            .children(edited_files)
+                            .child(rendered)
+                            .into_any_element(),
+                    )
+                    .into_any_element()
                 } else {
                     Empty.into_any()
                 }
@@ -6171,12 +6236,13 @@ impl ThreadView {
                     .map(|this| {
                         if is_first_indented {
                             this.pt_0p5()
+                        } else if entry_ix == 0 {
+                            this.pt(px(26.))
                         } else {
-                            this.pt_2()
+                            this.pt_0()
                         }
                     })
-                    .pb_3()
-                    .px_2()
+                    .pb(px(22.))
                     .gap_1p5()
                     .w_full()
                     .when(is_editable && has_checkpoint_button, |this| {
@@ -6201,19 +6267,23 @@ impl ThreadView {
                     .child(
                         div()
                             .relative()
+                            .w_full()
+                            .max_w(px(610.))
+                            .self_end()
                             .child(
                                 div()
-                                    .py_3()
-                                    .px_2()
-                                    .rounded_md()
-                                    .bg(cx.theme().colors().editor_background)
+                                    .py(px(16.))
+                                    .px(px(20.))
+                                    .rounded(px(14.))
+                                    .rounded_br(px(4.))
+                                    .bg(gpui::rgb(0x34313F))
                                     .border_1()
                                     .when(is_indented, |this| {
                                         this.py_2().px_2().when(opaque_window, |this| {
                                             this.shadow_sm()
                                         })
                                     })
-                                    .border_color(cx.theme().colors().border)
+                                    .border_color(gpui::rgb(0x464152))
                                     .map(|this| {
                                         if !is_editable {
                                             if is_subagent {
@@ -6227,12 +6297,12 @@ impl ThreadView {
                                         if editing && !editor_focus {
                                             return this.border_dashed()
                                         }
-                                        this.when(opaque_window, |this| this.shadow_md())
-                                            .hover(|s| {
+                                        this.hover(|s| {
                                                 s.border_color(focus_border.opacity(0.8))
                                             })
                                     })
-                                    .text_xs()
+                                    .text_size(px(14.))
+                                    .line_height(px(22.))
                                     .child(editor.clone().into_any_element())
                             )
                             .when(editor_focus, |this| {
@@ -6322,8 +6392,6 @@ impl ThreadView {
                 is_subagent_output: _,
             }) => {
                 let mut is_blank = true;
-                let is_last = entry_ix + 1 == total_entries;
-
                 let style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
                 let message_body = v_flex()
                     .w_full()
@@ -6373,9 +6441,8 @@ impl ThreadView {
                     Empty.into_any()
                 } else {
                     v_flex()
-                        .px_5()
-                        .py_1p5()
-                        .when(is_last, |this| this.pb_4())
+                        .pb(px(22.))
+                        .when(entry_ix == 0, |this| this.pt(px(26.)))
                         .w_full()
                         .text_ui(cx)
                         .child(self.render_message_context_menu(entry_ix, message_body, cx))
@@ -6562,7 +6629,7 @@ impl ThreadView {
             v_flex()
                 .w_full()
                 .child(primary)
-                .when(!is_assistant, |this| {
+                .when(!is_assistant && !self.status_indicator_in_list, |this| {
                     this.child(self.render_thread_controls(
                         &thread,
                         entry_ix,
@@ -7261,7 +7328,6 @@ impl ThreadView {
 
     pub(crate) fn sync_editor_mode(&mut self, cx: &mut Context<Self>) {
         let has_messages = self.list_state.item_count() > 0;
-        let v2_empty_state = !has_messages;
 
         if !has_messages {
             self.editor_expanded = false;
@@ -7272,12 +7338,6 @@ impl ThreadView {
                 scale_ui_elements_with_buffer_font_size: false,
                 show_active_line_background: false,
                 sizing_behavior: SizingBehavior::ExcludeOverscrollMargin,
-            }
-        } else if v2_empty_state {
-            EditorMode::Full {
-                scale_ui_elements_with_buffer_font_size: false,
-                show_active_line_background: false,
-                sizing_behavior: SizingBehavior::Default,
             }
         } else {
             EditorMode::AutoHeight {
@@ -7290,109 +7350,107 @@ impl ThreadView {
         });
     }
 
-    /// Ensures the list item count includes (or excludes) an extra item for the generating indicator
-    pub(crate) fn sync_generating_indicator(&mut self, cx: &App) {
+    pub(crate) fn sync_status_indicator(&mut self, cx: &App) {
         let thread = self.thread.read(cx);
 
         let is_generating =
             matches!(thread.status(), ThreadStatus::Generating) && !thread.is_compacting();
+        if is_generating {
+            self.response_cancelled = false;
+        }
 
-        if is_generating && !self.generating_indicator_in_list {
+        let show_status = is_generating
+            || (thread.parent_session_id().is_none()
+                && thread
+                    .action_log()
+                    .read(cx)
+                    .changed_buffers(cx)
+                    .next()
+                    .is_some())
+            || (!thread.entries().is_empty()
+                && (self.thread_error.is_some()
+                    || self.thread_retry_status.is_some()
+                    || self.response_cancelled));
+
+        if show_status && !self.status_indicator_in_list {
             let entries_count = self.thread.read(cx).entries().len();
             self.list_state.splice(entries_count..entries_count, 1);
-            self.generating_indicator_in_list = true;
-        } else if !is_generating && self.generating_indicator_in_list {
+            self.list_state
+                .remeasure_items(entries_count.saturating_sub(1)..entries_count);
+            self.status_indicator_in_list = true;
+        } else if !show_status && self.status_indicator_in_list {
             let entries_count = self.thread.read(cx).entries().len();
             self.list_state.splice(entries_count..entries_count + 1, 0);
-            self.generating_indicator_in_list = false;
+            self.list_state
+                .remeasure_items(entries_count.saturating_sub(1)..entries_count);
+            self.status_indicator_in_list = false;
+        } else if self.status_indicator_in_list {
+            let entries_count = thread.entries().len();
+            self.list_state
+                .remeasure_items(entries_count..entries_count + 1);
         }
     }
 
     fn render_generating(&self, confirmation: bool, cx: &App) -> impl IntoElement {
-        let show_stats = AgentSettings::get_global(cx).show_turn_stats;
-        let elapsed_label = show_stats
-            .then(|| {
-                self.turn_fields.turn_started_at.and_then(|started_at| {
-                    let elapsed = started_at.elapsed();
-                    (elapsed > STOPWATCH_THRESHOLD).then(|| duration_alt_display(elapsed))
-                })
-            })
-            .flatten();
-
-        let is_blocked_on_terminal_command =
-            !confirmation && self.is_blocked_on_terminal_command(cx);
-        let is_waiting = confirmation || self.thread.read(cx).has_in_progress_tool_calls();
-
-        let turn_tokens_label = elapsed_label
-            .is_some()
-            .then(|| {
-                self.turn_fields
-                    .turn_tokens
-                    .filter(|&tokens| tokens > TOKEN_THRESHOLD)
-                    .map(|tokens| crate::humanize_token_count(tokens))
-            })
-            .flatten();
-
-        let arrow_icon = if is_waiting {
-            IconName::ArrowUp
+        let thread = self.thread.read(cx);
+        let active_tool = thread
+            .entries()
+            .iter()
+            .rev()
+            .take_while(|entry| !matches!(entry, AgentThreadEntry::UserMessage(_)))
+            .find_map(|entry| match entry {
+                AgentThreadEntry::ToolCall(tool_call)
+                    if matches!(
+                        tool_call.status,
+                        ToolCallStatus::InProgress | ToolCallStatus::Pending
+                    ) =>
+                {
+                    let label = tool_call.label.read(cx).source();
+                    label
+                        .lines()
+                        .find(|line| !line.trim().is_empty())
+                        .map(str::to_owned)
+                }
+                _ => None,
+            });
+        let label = if confirmation {
+            "Awaiting confirmation".to_string()
         } else {
-            IconName::ArrowDown
+            active_tool.unwrap_or_else(|| {
+                if self.is_blocked_on_terminal_command(cx) {
+                    "Running command…"
+                } else {
+                    "Working…"
+                }
+                .to_string()
+            })
         };
-
         h_flex()
             .id("generating-spinner")
-            .py_2()
-            .px(rems_from_px(22_f32))
-            .gap_2()
-            .map(|this| {
-                if confirmation {
-                    this.child(
-                        h_flex()
-                            .w_2()
-                            .justify_center()
-                            .child(GeneratingSpinnerElement::new(SpinnerVariant::Sand)),
-                    )
-                    .child(
-                        div().min_w(rems(8.)).child(
-                            LoadingLabel::new("Awaiting Confirmation")
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        ),
-                    )
-                } else if is_blocked_on_terminal_command {
-                    this
-                } else {
-                    this.child(
-                        h_flex()
-                            .w_2()
-                            .justify_center()
-                            .child(GeneratingSpinnerElement::new(SpinnerVariant::Dots)),
-                    )
-                }
-            })
-            .when_some(elapsed_label, |this, elapsed| {
-                this.child(
-                    Label::new(elapsed)
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-            })
-            .when_some(turn_tokens_label, |this, tokens| {
-                this.child(
-                    h_flex()
-                        .gap_0p5()
-                        .child(
-                            Icon::new(arrow_icon)
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                        .child(
-                            Label::new(format!("{} tokens", tokens))
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        ),
-                )
-            })
+            .h(px(24.))
+            .w_full()
+            .gap(px(11.))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(9.))
+                    .rounded_full()
+                    .bg(if confirmation {
+                        rgb(0xCDBA86)
+                    } else {
+                        rgb(0xABC7B5)
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .line_height(px(18.))
+                    .text_color(rgb(0xA8ACBD))
+                    .truncate()
+                    .child(label),
+            )
             .into_any_element()
     }
 
@@ -11143,7 +11201,14 @@ impl ThreadView {
             ),
         };
 
-        Some(div().child(callout.border_position(self.callout_border_position())))
+        let title_color = match self.thread_error.as_ref()? {
+            ThreadError::AuthenticationRequired(_)
+            | ThreadError::AuthenticationFailed { .. }
+            | ThreadError::NoCredentials { .. }
+            | ThreadError::StreamError { .. } => 0xD6B99B,
+            _ => 0xD3A7AD,
+        };
+        Some(div().child(callout.conversation_card(rgb(title_color).into())))
     }
 
     fn render_refusal_error(&self, cx: &mut Context<'_, Self>) -> Callout {
@@ -11171,13 +11236,17 @@ impl ThreadView {
     ) -> Callout {
         Callout::new()
             .severity(Severity::Error)
-            .title("Authentication Required")
+            .title("Reconnect your provider")
             .icon(IconName::XCircle)
             .description(error.clone())
             .actions_slot(
                 h_flex()
-                    .gap_0p5()
+                    .gap(px(8.))
                     .child(self.authenticate_button(cx))
+                    .when(
+                        self.model_selector.is_some() || self.config_options_view.is_some(),
+                        |this| this.child(self.open_model_selector_button(cx)),
+                    )
                     .child(self.create_copy_button(error)),
             )
             .dismiss_action(self.dismiss_error_button(cx))
@@ -11220,8 +11289,12 @@ impl ThreadView {
             .when(show_actions, |callout| {
                 callout.actions_slot(
                     h_flex()
-                        .gap_0p5()
+                        .gap(px(8.))
                         .when(can_resume, |this| this.child(self.retry_button(cx)))
+                        .when(
+                            self.model_selector.is_some() || self.config_options_view.is_some(),
+                            |this| this.child(self.open_model_selector_button(cx)),
+                        )
                         .when(show_copy, |this| {
                             this.child(self.create_copy_button(message.clone()))
                         }),
@@ -11315,14 +11388,12 @@ impl ThreadView {
     }
 
     fn open_model_selector_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("open-model-selector", "Select Model")
-            .label_size(LabelSize::Small)
-            .style(ButtonStyle::Filled)
-            .key_binding(KeyBinding::for_action(&ToggleModelSelector, cx))
-            .on_click(cx.listener(|this, _, window, cx| {
+        Self::response_action_button("open-model-selector", "Choose another model", false).on_click(
+            cx.listener(|this, _, window, cx| {
                 this.clear_thread_error(cx);
                 window.dispatch_action(ToggleModelSelector.boxed_clone(), cx);
-            }))
+            }),
+        )
     }
 
     fn render_prompt_too_large_error(&self, cx: &mut Context<Self>) -> Callout {
@@ -11344,12 +11415,78 @@ impl ThreadView {
     }
 
     fn retry_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("retry", "Retry")
-            .label_size(LabelSize::Small)
-            .style(ButtonStyle::Filled)
-            .on_click(cx.listener(|this, _, _, cx| {
+        Self::response_action_button("retry", "Retry", true).on_click(cx.listener(
+            |this, _, _, cx| {
                 this.retry_generation(cx);
-            }))
+            },
+        ))
+    }
+
+    fn response_action_button(id: &'static str, label: &'static str, primary: bool) -> ButtonLike {
+        ButtonLike::new(id)
+            .aria_label(label)
+            .size(ButtonSize::None)
+            .height(px(30.).into())
+            .corner_radius(px(6.))
+            .style(ButtonStyle::OutlinedCustom(
+                rgb(if primary { 0x655971 } else { 0x454957 }).into(),
+            ))
+            .background(if primary {
+                rgb(0x3A3346).into()
+            } else {
+                gpui::transparent_black()
+            })
+            .child(
+                div()
+                    .px(px(10.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(rgb(0xDED5E9))
+                    .child(label),
+            )
+    }
+
+    fn render_cancelled_response(&self, cx: &mut Context<Self>) -> Callout {
+        let thread = self.thread.read(cx);
+        let can_resume = thread.can_retry(cx);
+        let has_changes = thread
+            .action_log()
+            .read(cx)
+            .changed_buffers(cx)
+            .next()
+            .is_some();
+        Callout::new()
+            .conversation_card(rgb(0xB9ACCB).into())
+            .title("Response stopped")
+            .description(
+                "You stopped this response. Any file changes made so far are still available.",
+            )
+            .when(can_resume || has_changes, |this| {
+                this.actions_slot(
+                    h_flex()
+                        .gap(px(8.))
+                        .when(can_resume, |this| {
+                            this.child(
+                                Self::response_action_button("continue-response", "Continue", true)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.retry_generation(cx)),
+                                    ),
+                            )
+                        })
+                        .when(has_changes, |this| {
+                            this.child(
+                                Self::response_action_button(
+                                    "review-stopped-changes",
+                                    "Review changes",
+                                    false,
+                                )
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(OpenAgentDiff.boxed_clone(), cx)
+                                }),
+                            )
+                        }),
+                )
+            })
     }
 
     fn new_thread_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -11375,31 +11512,28 @@ impl ThreadView {
     }
 
     fn authenticate_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("authenticate", "Authenticate")
-            .label_size(LabelSize::Small)
-            .style(ButtonStyle::Filled)
-            .on_click(cx.listener({
-                move |this, _, window, cx| {
-                    let server_view = this.server_view.clone();
+        Self::response_action_button("authenticate", "Reconnect", true).on_click(cx.listener({
+            move |this, _, window, cx| {
+                let server_view = this.server_view.clone();
 
-                    this.clear_thread_error(cx);
-                    if let Some(message) = this.in_flight_prompt.take() {
-                        this.message_editor.update(cx, |editor, cx| {
-                            editor.set_message(message, window, cx);
-                        });
-                    }
-                    let connection = this.thread.read(cx).connection().clone();
-                    window.defer(cx, |window, cx| {
-                        ConversationView::handle_auth_required(
-                            server_view,
-                            AuthRequired::new(),
-                            connection,
-                            window,
-                            cx,
-                        );
-                    })
+                this.clear_thread_error(cx);
+                if let Some(message) = this.in_flight_prompt.take() {
+                    this.message_editor.update(cx, |editor, cx| {
+                        editor.set_message(message, window, cx);
+                    });
                 }
-            }))
+                let connection = this.thread.read(cx).connection().clone();
+                window.defer(cx, |window, cx| {
+                    ConversationView::handle_auth_required(
+                        server_view,
+                        AuthRequired::new(),
+                        connection,
+                        window,
+                        cx,
+                    );
+                })
+            }
+        }))
     }
 
     fn current_model_name(&self, cx: &App) -> SharedString {
@@ -11443,21 +11577,16 @@ impl ThreadView {
         Callout::new()
             .severity(Severity::Error)
             .icon(IconName::XCircle)
-            .title("An Error Happened")
+            .title("The response couldn’t finish")
             .description_slot(description)
             .actions_slot(
                 h_flex()
-                    .gap_0p5()
-                    .when(can_resume, |this| {
-                        this.child(
-                            IconButton::new("retry", IconName::RotateCw)
-                                .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("Retry Generation"))
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.retry_generation(cx);
-                                })),
-                        )
-                    })
+                    .gap(px(8.))
+                    .when(can_resume, |this| this.child(self.retry_button(cx)))
+                    .when(
+                        self.model_selector.is_some() || self.config_options_view.is_some(),
+                        |this| this.child(self.open_model_selector_button(cx)),
+                    )
                     .child(self.create_copy_button(error.to_string())),
             )
             .dismiss_action(self.dismiss_error_button(cx))
@@ -12149,6 +12278,7 @@ impl Render for ThreadView {
         // current availability of feedback/sharing, which can change between
         // renders (settings, connection state, feature flags).
         self.sync_local_commands(cx);
+        self.sync_status_indicator(cx);
 
         let has_messages = self.list_state.item_count() > 0;
         let list_state = self.list_state.clone();
@@ -12487,8 +12617,10 @@ impl Render for ThreadView {
                 this.child(self.render_codex_windows_warning(cx))
             })
             .children(self.render_skill_loading_issues(cx))
-            .children(self.render_thread_retry_status_callout(cx))
-            .children(self.render_thread_error(window, cx))
+            .when(!has_messages, |this| {
+                this.children(self.render_thread_retry_status_callout(cx))
+                    .children(self.render_thread_error(window, cx))
+            })
             .when_some(
                 match has_messages {
                     true => None,

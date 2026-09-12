@@ -2438,6 +2438,11 @@ impl App {
         self.platform.set_dock_menu(menus, &self.keymap.borrow())
     }
 
+    /// Show an application button in the system menu bar, or remove it with `None`.
+    pub fn set_status_item(&self, title: Option<&str>) -> Result<()> {
+        self.platform.set_status_item(title)
+    }
+
     /// Performs the action associated with the given dock menu item, only used on Windows for now.
     pub fn perform_dock_menu_action(&self, action: usize) {
         self.platform.perform_dock_menu_action(action);

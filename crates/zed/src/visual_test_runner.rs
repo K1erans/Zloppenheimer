@@ -176,7 +176,7 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
     // Initialize all Zed subsystems
     cx.update(|cx| {
         gpui_tokio::init(cx);
-        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        theme_settings::init(theme::LoadThemes::All(Box::new(Assets)), cx);
         client::init(&app_state.client, cx);
         audio::init(cx);
         workspace::init(app_state.clone(), cx);
@@ -1352,6 +1352,66 @@ fn run_settings_ui_subpage_visual_tests(
 
     cx.run_until_parked();
 
+    workspace_window.update(cx, |_, window, cx| {
+        window.dispatch_action(Box::new(zed_actions::OpenSettings), cx);
+    })?;
+    cx.run_until_parked();
+    let general_settings_window = cx
+        .update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find_map(|window| window.downcast::<SettingsWindow>())
+        })
+        .context("General settings window not found")?;
+    cx.run_until_parked();
+    let output_dir = std::env::var("VISUAL_TEST_OUTPUT_DIR")
+        .unwrap_or_else(|_| "target/visual_tests".to_string());
+    std::fs::create_dir_all(&output_dir)?;
+    cx.capture_screenshot(general_settings_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_settings_general.png"))?;
+    for (page, filename) in [
+        ("Profile", "paper_settings_profile.png"),
+        ("AI", "paper_settings_ai.png"),
+        ("Keymap", "paper_settings_keymap.png"),
+    ] {
+        workspace_window.update(cx, |_, window, cx| {
+            window.dispatch_action(
+                Box::new(zed_actions::OpenSettingsPage {
+                    page: page.to_string(),
+                    target: None,
+                }),
+                cx,
+            );
+        })?;
+        cx.run_until_parked();
+        cx.capture_screenshot(general_settings_window.into())?
+            .save(PathBuf::from(&output_dir).join(filename))?;
+    }
+    workspace_window.update(cx, |_, window, cx| {
+        window.dispatch_action(
+            Box::new(zed_actions::OpenSettingsPage {
+                page: "AI".to_string(),
+                target: None,
+            }),
+            cx,
+        );
+    })?;
+    cx.run_until_parked();
+    general_settings_window.update(cx, |settings, window, cx| {
+        settings.navigate_to_sub_page("model_connections", window, cx);
+    })?;
+    cx.run_until_parked();
+    cx.capture_screenshot(general_settings_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_settings_connections.png"))?;
+    general_settings_window.update(cx, |settings, window, cx| {
+        settings.add_custom_agent(window, cx)
+    })?;
+    cx.run_until_parked();
+    cx.capture_screenshot(general_settings_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_settings_custom_agent.png"))?;
+    general_settings_window.update(cx, |_, window, _| window.remove_window())?;
+    cx.run_until_parked();
+
     // Test 1: Open settings with a path that maps to multiple items (e.g., "agent")
     // This should NOT auto-open a sub-page since multiple items match
     workspace_window
@@ -2017,8 +2077,12 @@ fn run_agent_thread_view_test(
     let temp_dir = tempfile::tempdir()?;
     let temp_path = temp_dir.keep();
     let canonical_temp = temp_path.canonicalize()?;
-    let project_path = canonical_temp.join("project");
+    let project_path = canonical_temp.join("Zloppenheimer");
     std::fs::create_dir_all(&project_path)?;
+    std::fs::write(
+        project_path.join("README.md"),
+        "# Zloppenheimer\n\nA workspace for building with agents.\n",
+    )?;
     let image_path = project_path.join("test-image.png");
     std::fs::write(&image_path, EMBEDDED_TEST_IMAGE)?;
 
@@ -2122,16 +2186,16 @@ fn run_agent_thread_view_test(
         .content(tool_content),
     )]);
 
-    let stub_agent: Rc<dyn AgentServer> = Rc::new(StubAgentServer::new(connection));
+    let stub_agent: Rc<dyn AgentServer> = Rc::new(StubAgentServer::new(connection.clone()));
 
     // Create a window sized for the agent panel
-    let window_size = size(px(500.0), px(900.0));
+    let window_size = size(px(1440.0), px(900.0));
     let bounds = Bounds {
         origin: point(px(0.0), px(0.0)),
         size: window_size,
     };
 
-    let workspace_window: WindowHandle<Workspace> = cx
+    let workspace_window: WindowHandle<MultiWorkspace> = cx
         .update(|cx| {
             cx.open_window(
                 WindowOptions {
@@ -2141,9 +2205,10 @@ fn run_agent_thread_view_test(
                     ..Default::default()
                 },
                 |window, cx| {
-                    cx.new(|cx| {
+                    let workspace = cx.new(|cx| {
                         Workspace::new(None, project.clone(), app_state.clone(), window, cx)
-                    })
+                    });
+                    cx.new(|cx| MultiWorkspace::new(workspace, window, cx))
                 },
             )
         })
@@ -2154,25 +2219,62 @@ fn run_agent_thread_view_test(
     // Load the AgentPanel
     let (weak_workspace, async_window_cx) = workspace_window
         .update(cx, |workspace, window, cx| {
-            (workspace.weak_handle(), window.to_async(cx))
+            (workspace.workspace().downgrade(), window.to_async(cx))
         })
         .context("Failed to get workspace handle")?;
 
     cx.background_executor.allow_parking();
     let panel = cx
         .foreground_executor
-        .block_test(AgentPanel::load(weak_workspace, async_window_cx))
+        .block_test(AgentPanel::load(
+            weak_workspace.clone(),
+            async_window_cx.clone(),
+        ))
         .context("Failed to load AgentPanel")?;
+    let project_panel = cx
+        .foreground_executor
+        .block_test(ProjectPanel::load(
+            weak_workspace.clone(),
+            async_window_cx.clone(),
+        ))
+        .context("Failed to load file explorer")?;
+    let git_panel = cx
+        .foreground_executor
+        .block_test(git_ui::git_panel::GitPanel::load(
+            weak_workspace,
+            async_window_cx,
+        ))
+        .context("Failed to load changes panel")?;
     cx.background_executor.forbid_parking();
 
-    cx.update_window(workspace_window.into(), |_, _window, cx| {
-        workspace_window
-            .update(cx, |workspace, window, cx| {
+    workspace_window.update(cx, |multi_workspace, window, cx| {
+        multi_workspace
+            .workspace()
+            .clone()
+            .update(cx, |workspace, cx| {
+                workspace.add_panel(project_panel.clone(), window, cx);
+                workspace.add_panel(git_panel.clone(), window, cx);
                 workspace.add_panel(panel.clone(), window, cx);
                 workspace.open_panel::<AgentPanel>(window, cx);
-            })
-            .log_err();
+            });
     })?;
+
+    let open_readme = workspace_window.update(cx, |multi_workspace, window, cx| {
+        multi_workspace
+            .workspace()
+            .clone()
+            .update(cx, |workspace, cx| {
+                let path = project::ProjectPath::from((
+                    worktree.read(cx).id(),
+                    Arc::<util::rel_path::RelPath>::from(util::rel_path::rel_path("README.md")),
+                ));
+                workspace.open_path(path, None, true, window, cx)
+            })
+    })?;
+    cx.background_executor.allow_parking();
+    let readme_result = cx.foreground_executor.block_test(open_readme);
+    cx.background_executor.forbid_parking();
+    readme_result.context("Failed to open the fixture README tab")?;
 
     cx.run_until_parked();
 
@@ -2189,6 +2291,119 @@ fn run_agent_thread_view_test(
     let thread_view = cx
         .read(|cx| panel.read(cx).active_thread_view_for_tests().cloned())
         .ok_or_else(|| anyhow::anyhow!("No active thread view"))?;
+
+    let output_dir = std::env::var("VISUAL_TEST_OUTPUT_DIR")
+        .unwrap_or_else(|_| "target/visual_tests".to_string());
+    std::fs::create_dir_all(&output_dir)?;
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("agent_thread_empty.png"))?;
+    let multi_workspace = workspace_window.update(cx, |_, _, cx| cx.entity())?;
+    let sidebar = cx.update_window(workspace_window.into(), |_, window, cx| {
+        cx.new(|cx| sidebar::Sidebar::new(multi_workspace, window, cx))
+    })?;
+    workspace_window.update(cx, |multi_workspace, window, cx| {
+        multi_workspace.register_sidebar(sidebar.clone(), cx);
+        if !multi_workspace.sidebar_open() {
+            multi_workspace.toggle_sidebar(window, cx);
+        }
+    })?;
+    cx.update(|cx| {
+        let now = chrono::Utc::now();
+        let paths = project.read(cx).worktree_paths(cx);
+        for (index, (title, hours)) in [
+            ("Polish the front page", 0),
+            ("Fix sidebar behaviour", 2),
+            ("Update model picker", 4),
+            ("Set up external agents", 48),
+            ("Explore the codebase", 72),
+            ("Refresh app branding", 73),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let timestamp = now - chrono::Duration::hours(hours);
+            let metadata = agent_ui::thread_metadata_store::ThreadMetadata {
+                thread_id: agent_ui::ThreadId::new(),
+                session_id: Some(acp::SessionId::new(format!("paper-front-{index}"))),
+                agent_id: agent::ZED_AGENT_ID.clone(),
+                title: Some(title.into()),
+                title_override: None,
+                updated_at: timestamp,
+                created_at: Some(timestamp),
+                interacted_at: Some(timestamp),
+                worktree_paths: paths.clone(),
+                remote_connection: None,
+                archived: false,
+            };
+            agent_ui::thread_metadata_store::ThreadMetadataStore::global(cx)
+                .update(cx, |store, cx| store.save(metadata, cx));
+        }
+    });
+    cx.run_until_parked();
+    workspace_window.update(cx, |multi_workspace, window, cx| {
+        multi_workspace
+            .workspace()
+            .clone()
+            .update(cx, |workspace, cx| {
+                workspace.hide_sidebar_hosted_panels(window, cx);
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            });
+    })?;
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_front_page.png"))?;
+
+    workspace_window.update(cx, |_, window, cx| {
+        window.dispatch_action(Box::new(zed_actions::agent::ToggleModelSelector), cx);
+    })?;
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_model_picker.png"))?;
+    workspace_window.update(cx, |_, window, cx| {
+        let selector = thread_view
+            .read(cx)
+            .active_thread()
+            .and_then(|thread| thread.read(cx).model_selector.clone());
+        if let Some(selector) = selector {
+            selector.update(cx, |selector, cx| selector.toggle(window, cx));
+        }
+    })?;
+    cx.run_until_parked();
+
+    let open_file = workspace_window.update(cx, |multi_workspace, window, cx| {
+        multi_workspace
+            .workspace()
+            .clone()
+            .update(cx, |workspace, cx| {
+                workspace.open_panel::<ProjectPanel>(window, cx);
+                workspace.open_path(
+                    project::ProjectPath::from((
+                        worktree.read(cx).id(),
+                        Arc::<util::rel_path::RelPath>::from(util::rel_path::rel_path("README.md")),
+                    )),
+                    None,
+                    true,
+                    window,
+                    cx,
+                )
+            })
+    })?;
+    cx.background_executor.allow_parking();
+    cx.foreground_executor.block_test(open_file)?;
+    cx.background_executor.forbid_parking();
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_file_editor.png"))?;
+    workspace_window.update(cx, |multi_workspace, window, cx| {
+        multi_workspace
+            .workspace()
+            .clone()
+            .update(cx, |workspace, cx| {
+                workspace.hide_sidebar_hosted_panels(window, cx);
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            });
+    })?;
+    cx.run_until_parked();
 
     let thread = cx
         .read(|cx| {
@@ -2230,6 +2445,71 @@ fn run_agent_thread_view_test(
 
     cx.run_until_parked();
 
+    workspace_window.update(cx, |workspace, window, cx| {
+        eprintln!(
+            "[DEBUG-usability] agent dock state: {:?}, zoomed: {:?}",
+            workspace
+                .workspace()
+                .read(cx)
+                .capture_dock_state(window, cx),
+            workspace.workspace().read(cx).zoomed_item()
+        );
+    })?;
+
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_conversation_response.png"))?;
+    let active_thread = cx
+        .read(|cx| thread_view.read(cx).active_thread().cloned())
+        .ok_or_else(|| anyhow::anyhow!("No active conversation for failure capture"))?;
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        active_thread.update(cx, |view, cx| {
+            view.message_editor.update(cx, |editor, cx| {
+                editor.set_text("Continue with the sidebar search field.", window, cx);
+            });
+            view.send(window, cx);
+        });
+    })?;
+    cx.run_until_parked();
+    let session_id = cx.read(|cx| thread.read(cx).session_id().clone());
+    connection.end_turn(session_id, acp::StopReason::MaxTokens);
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_conversation_error.png"))?;
+    active_thread.update(cx, |view, cx| {
+        view.clear_thread_error(cx);
+        view.thread_retry_status = Some(acp_thread::RetryStatus {
+            last_error: "Provider temporarily unavailable".into(),
+            attempt: 1,
+            max_attempts: 3,
+            started_at: std::time::Instant::now(),
+            duration: Duration::from_secs(30),
+            meta: None,
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_conversation_retry.png"))?;
+    active_thread.update(cx, |view, cx| {
+        view.thread_retry_status = None;
+        cx.notify();
+    });
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        active_thread.update(cx, |view, cx| {
+            view.message_editor.update(cx, |editor, cx| {
+                editor.set_text("Try the search field again.", window, cx);
+            });
+            view.send(window, cx);
+        });
+    })?;
+    cx.run_until_parked();
+    active_thread.update(cx, |view, cx| view.cancel_generation(cx));
+    cx.run_until_parked();
+    cx.capture_screenshot(workspace_window.into())?
+        .save(PathBuf::from(&output_dir).join("paper_conversation_cancelled.png"))?;
+    drop(active_thread);
+    cx.run_until_parked();
+
     // Capture the COLLAPSED state
     let collapsed_result = run_visual_test(
         "agent_thread_with_image_collapsed",
@@ -2263,7 +2543,7 @@ fn run_agent_thread_view_test(
     // This prevents "root path could not be canonicalized" errors when we clean up
     workspace_window
         .update(cx, |workspace, _window, cx| {
-            let project = workspace.project().clone();
+            let project = workspace.workspace().read(cx).project().clone();
             project.update(cx, |project, cx| {
                 let worktree_ids: Vec<_> =
                     project.worktrees(cx).map(|wt| wt.read(cx).id()).collect();
@@ -2284,6 +2564,13 @@ fn run_agent_thread_view_test(
         window.remove_window();
     })
     .log_err();
+
+    drop(sidebar);
+    drop(thread);
+    drop(thread_view);
+    drop(panel);
+    drop(project_panel);
+    drop(git_panel);
 
     // Run until all cleanup tasks complete
     cx.run_until_parked();
@@ -2763,8 +3050,8 @@ fn run_multi_workspace_sidebar_visual_tests(
 
     // Open the sidebar
     multi_workspace_window
-        .update(cx, |multi_workspace, window, cx| {
-            multi_workspace.toggle_sidebar(window, cx);
+        .update(cx, |multi_workspace, _window, cx| {
+            multi_workspace.open_sidebar(cx);
         })
         .context("Failed to toggle sidebar")?;
 
@@ -3431,8 +3718,8 @@ fn open_sidebar_test_window(
 
     // Open the sidebar
     multi_workspace_window
-        .update(cx, |mw, window, cx| {
-            mw.toggle_sidebar(window, cx);
+        .update(cx, |mw, _window, cx| {
+            mw.open_sidebar(cx);
         })
         .context("Failed to toggle sidebar")?;
 

@@ -455,6 +455,7 @@ pub struct Pane {
     welcome_page: Option<Entity<crate::welcome::WelcomePage>>,
 
     pub in_center_group: bool,
+    terminal_style: bool,
 }
 
 pub struct ActivationHistoryEntry {
@@ -626,6 +627,7 @@ impl Pane {
             project_item_restoration_data: HashMap::default(),
             welcome_page: None,
             in_center_group: false,
+            terminal_style: false,
         }
     }
 
@@ -826,6 +828,11 @@ impl Pane {
 
     pub fn activation_history(&self) -> &[ActivationHistoryEntry] {
         &self.activation_history
+    }
+
+    pub fn set_terminal_style(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.terminal_style = enabled;
+        cx.notify();
     }
 
     pub fn set_should_display_tab_bar<F>(&mut self, should_display_tab_bar: F)
@@ -2906,6 +2913,8 @@ impl Pane {
 
         let capability = item.capability(cx);
         let tab = Tab::new(ix)
+            .document_style(self.in_center_group)
+            .terminal_style(self.terminal_style)
             .position(if is_first_item {
                 TabPosition::First
             } else if is_last_item {
@@ -3018,6 +3027,8 @@ impl Pane {
                     };
                     end_slot_tooltip_text = "Close Tab";
                     match show_close_button {
+                        ShowCloseButton::Active if !is_active => return this,
+                        ShowCloseButton::Active => IconButton::new("close tab", IconName::Close),
                         ShowCloseButton::Always => IconButton::new("close tab", IconName::Close),
                         ShowCloseButton::Hover => {
                             IconButton::new("close tab", IconName::Close).visible_on_hover("")
@@ -3028,6 +3039,9 @@ impl Pane {
                     .icon_color(Color::Muted)
                     .size(ButtonSize::None)
                     .icon_size(IconSize::Small)
+                    .when(self.in_center_group, |this| {
+                        this.icon_size(IconSize::Custom(rems_from_px(10_f32)))
+                    })
                     .on_click(cx.listener(move |pane, _, window, cx| {
                         pane.close_item_by_id(item_id, SaveIntent::Close, window, cx)
                             .detach_and_log_err(cx);
@@ -3609,7 +3623,9 @@ impl Pane {
     ) -> AnyElement {
         let tab_bar = self
             .configure_tab_bar_start(
-                TabBar::new("tab_bar"),
+                TabBar::new("tab_bar")
+                    .document_style(self.in_center_group)
+                    .terminal_style(self.terminal_style),
                 navigate_backward,
                 navigate_forward,
                 window,
@@ -3647,7 +3663,9 @@ impl Pane {
     ) -> AnyElement {
         let pinned_tab_bar = self
             .configure_tab_bar_start(
-                TabBar::new("pinned_tab_bar"),
+                TabBar::new("pinned_tab_bar")
+                    .document_style(self.in_center_group)
+                    .terminal_style(self.terminal_style),
                 navigate_backward,
                 navigate_forward,
                 window,
@@ -3667,11 +3685,10 @@ impl Pane {
             .flex_none()
             .child(pinned_tab_bar)
             .child(
-                TabBar::new("unpinned_tab_bar").child(self.render_unpinned_tabs_container(
-                    unpinned_tabs,
-                    tab_count,
-                    cx,
-                )),
+                TabBar::new("unpinned_tab_bar")
+                    .document_style(self.in_center_group)
+                    .terminal_style(self.terminal_style)
+                    .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, cx)),
             )
             .into_any_element()
     }
@@ -3691,6 +3708,9 @@ impl Pane {
                 this.suppress_scroll = true;
             }))
             .children(unpinned_tabs)
+            .when(self.in_center_group && self.show_tab_bar_buttons, |this| {
+                this.child(render_new_item_button(self))
+            })
             .child(self.render_tab_bar_drop_target(tab_count, cx))
     }
 
@@ -3703,6 +3723,7 @@ impl Pane {
             .id("tab_bar_drop_target")
             .min_w_6()
             .h(Tab::container_height(cx))
+            .when(self.in_center_group, |this| this.h(px(48.)))
             .flex_grow_1()
             // HACK: This empty child is currently necessary to force the drop target to appear
             // despite us setting a min width above.
@@ -3747,6 +3768,7 @@ impl Pane {
             .debug_selector(|| "pinned_tabs_border".into())
             .min_w_6()
             .h(Tab::container_height(cx))
+            .when(self.in_center_group, |this| this.h(px(48.)))
             .flex_grow_1()
             .border_l_1()
             .border_color(cx.theme().colors().border)
@@ -4308,12 +4330,48 @@ impl Pane {
     }
 }
 
+fn render_new_item_button(pane: &Pane) -> AnyElement {
+    PopoverMenu::new("pane-tab-bar-popover-menu")
+        .trigger_with_tooltip(
+            IconButton::new("plus", IconName::Plus)
+                .icon_size(IconSize::Small)
+                .when(pane.in_center_group, |this| {
+                    this.width(px(36.))
+                        .height(px(36.).into())
+                        .corner_radius(px(8.))
+                        .icon_size(IconSize::Custom(rems_from_px(18_f32)))
+                }),
+            Tooltip::text("New…"),
+        )
+        .anchor(Anchor::TopRight)
+        .with_handle(pane.new_item_context_menu_handle.clone())
+        .menu(move |window, cx| {
+            Some(ContextMenu::build(window, cx, |menu, _, _| {
+                menu.action("New File", NewFile.boxed_clone())
+                    .action("Open File", ToggleFileFinder::default().boxed_clone())
+                    .separator()
+                    .action("Search Project", DeploySearch::default().boxed_clone())
+                    .action("Search Symbols", ToggleProjectSymbols.boxed_clone())
+                    .separator()
+                    .action("New Terminal", NewTerminal::default().boxed_clone())
+                    .action(
+                        "New Center Terminal",
+                        NewCenterTerminal::default().boxed_clone(),
+                    )
+            }))
+        })
+        .into_any_element()
+}
+
 fn default_render_tab_bar_buttons(
     pane: &mut Pane,
     window: &mut Window,
     cx: &mut Context<Pane>,
 ) -> (Option<AnyElement>, Option<AnyElement>) {
-    if !pane.has_focus(window, cx) && !pane.context_menu_focused(window, cx) {
+    if !pane.in_center_group
+        && !pane.has_focus(window, cx)
+        && !pane.context_menu_focused(window, cx)
+    {
         return (None, None);
     }
     let (can_clone, can_split_move) = match pane.active_item() {
@@ -4326,35 +4384,39 @@ fn default_render_tab_bar_buttons(
     let right_children = h_flex()
         // Instead we need to replicate the spacing from the [TabBar]'s `end_slot` here.
         .gap(DynamicSpacing::Base04.rems(cx))
-        .child(
-            PopoverMenu::new("pane-tab-bar-popover-menu")
-                .trigger_with_tooltip(
-                    IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
-                    Tooltip::text("New…"),
+        .when(!pane.in_center_group, |this| {
+            this.child(render_new_item_button(pane))
+        })
+        .when(
+            pane.in_center_group && WorkspaceSettings::get_global(cx).show_bottom_panel_button,
+            |this| {
+                this.gap_0().child(
+                    IconButton::new("terminal", IconName::Terminal)
+                        .width(px(36.))
+                        .height(px(36.).into())
+                        .corner_radius(px(8.))
+                        .icon_size(IconSize::Custom(rems_from_px(18_f32)))
+                        .tooltip(Tooltip::text("Toggle terminal"))
+                        .on_click(|_, window, cx| {
+                            match cx.build_action("terminal_panel::Toggle", None) {
+                                Ok(action) => window.dispatch_action(action, cx),
+                                Err(error) => log::error!("Failed to toggle terminal: {error}"),
+                            }
+                        }),
                 )
-                .anchor(Anchor::TopRight)
-                .with_handle(pane.new_item_context_menu_handle.clone())
-                .menu(move |window, cx| {
-                    Some(ContextMenu::build(window, cx, |menu, _, _| {
-                        menu.action("New File", NewFile.boxed_clone())
-                            .action("Open File", ToggleFileFinder::default().boxed_clone())
-                            .separator()
-                            .action("Search Project", DeploySearch::default().boxed_clone())
-                            .action("Search Symbols", ToggleProjectSymbols.boxed_clone())
-                            .separator()
-                            .action("New Terminal", NewTerminal::default().boxed_clone())
-                            .action(
-                                "New Center Terminal",
-                                NewCenterTerminal::default().boxed_clone(),
-                            )
-                    }))
-                }),
+            },
         )
         .child(
             PopoverMenu::new("pane-tab-bar-split")
                 .trigger_with_tooltip(
                     IconButton::new("split", IconName::Split)
                         .icon_size(IconSize::Small)
+                        .when(pane.in_center_group, |this| {
+                            this.width(px(36.))
+                                .height(px(36.).into())
+                                .corner_radius(px(8.))
+                                .icon_size(IconSize::Custom(rems_from_px(18_f32)))
+                        })
                         .disabled(!can_clone && !can_split_move),
                     Tooltip::text("Split Pane"),
                 )
@@ -4378,22 +4440,24 @@ fn default_render_tab_bar_buttons(
                     .into()
                 }),
         )
-        .child({
-            let zoomed = pane.is_zoomed();
-            IconButton::new("toggle_zoom", IconName::Maximize)
-                .icon_size(IconSize::Small)
-                .toggle_state(zoomed)
-                .selected_icon(IconName::Minimize)
-                .on_click(cx.listener(|pane, _, window, cx| {
-                    pane.toggle_zoom(&crate::ToggleZoom, window, cx);
-                }))
-                .tooltip(move |_window, cx| {
-                    Tooltip::for_action(
-                        if zoomed { "Zoom Out" } else { "Zoom In" },
-                        &ToggleZoom,
-                        cx,
-                    )
-                })
+        .when(!pane.in_center_group, |this| {
+            this.child({
+                let zoomed = pane.is_zoomed();
+                IconButton::new("toggle_zoom", IconName::Maximize)
+                    .icon_size(IconSize::Small)
+                    .toggle_state(zoomed)
+                    .selected_icon(IconName::Minimize)
+                    .on_click(cx.listener(|pane, _, window, cx| {
+                        pane.toggle_zoom(&crate::ToggleZoom, window, cx);
+                    }))
+                    .tooltip(move |_window, cx| {
+                        Tooltip::for_action(
+                            if zoomed { "Zoom Out" } else { "Zoom In" },
+                            &ToggleZoom,
+                            cx,
+                        )
+                    })
+            })
         })
         .into_any_element()
         .into();
@@ -4419,7 +4483,8 @@ impl Render for Pane {
             .contribute_context(&mut key_context, cx);
 
         let should_display_tab_bar = self.should_display_tab_bar.clone();
-        let display_tab_bar = should_display_tab_bar(window, cx);
+        let display_tab_bar = should_display_tab_bar(window, cx)
+            && self.active_item().is_none_or(|item| item.show_tab_bar(cx));
         let Some(project) = self.project.upgrade() else {
             return div().track_focus(&self.focus_handle(cx));
         };

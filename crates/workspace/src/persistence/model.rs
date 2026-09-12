@@ -109,7 +109,10 @@ impl From<SerializedProjectGroup> for ProjectGroupKey {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MultiWorkspaceState {
     pub active_workspace_id: Option<WorkspaceId>,
-    pub sidebar_open: bool,
+    /// `None` when the window predates this field being persisted, which must
+    /// not be confused with the sidebar having been closed.
+    #[serde(default)]
+    pub sidebar_open: Option<bool>,
     #[serde(alias = "project_group_keys")]
     pub project_groups: Vec<SerializedProjectGroup>,
     #[serde(default)]

@@ -1,3 +1,9 @@
+mod profile_page;
+pub(crate) use profile_page::{ProfilePageState, render_profile_page};
+mod model_connections_page;
+pub(crate) use model_connections_page::render_model_connections_page;
+mod ai_page;
+pub(crate) use ai_page::{AiPageState, render_ai_page};
 mod audio_input_output_setup;
 mod audio_test_window;
 mod edit_prediction_provider_setup;
@@ -16,7 +22,8 @@ pub(crate) use audio_input_output_setup::{
 pub(crate) use audio_test_window::open_audio_test_window;
 pub(crate) use edit_prediction_provider_setup::render_edit_prediction_setup_page;
 pub(crate) use external_agents_page::{
-    CustomAgentForm, render_add_agent_popover, render_external_agents_page,
+    CustomAgentForm, open_custom_agent_form, render_add_agent_popover, render_custom_agent_modal,
+    render_external_agents_page,
 };
 pub(crate) use feature_flags::render_feature_flags_page;
 pub(crate) use llm_providers_page::{

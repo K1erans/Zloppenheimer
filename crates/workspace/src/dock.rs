@@ -36,6 +36,13 @@ pub use proto::PanelId;
 pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn persistent_name() -> &'static str;
     fn panel_key() -> &'static str;
+    fn workspace_item(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Box<dyn crate::item::ItemHandle>> {
+        None
+    }
     /// The `Focusable::focus_handle` root identifies the panel's subtree for containment checks
     /// and must be tracked by the panel's root element. This method returns the handle that should
     /// receive focus when the panel is activated, such as a filter, commit, or message editor; it
@@ -107,6 +114,11 @@ pub trait PanelHandle: Send + Sync {
     fn panel_id(&self) -> EntityId;
     fn persistent_name(&self) -> &'static str;
     fn panel_key(&self) -> &'static str;
+    fn workspace_item(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Box<dyn crate::item::ItemHandle>>;
     fn position(&self, window: &Window, cx: &App) -> DockPosition;
     fn position_is_valid(&self, position: DockPosition, cx: &App) -> bool;
     fn set_position(&self, position: DockPosition, window: &mut Window, cx: &mut App);
@@ -245,6 +257,14 @@ where
 
     fn to_any(&self) -> AnyView {
         self.clone().into()
+    }
+
+    fn workspace_item(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Box<dyn crate::item::ItemHandle>> {
+        self.update(cx, |panel, cx| panel.workspace_item(window, cx))
     }
 
     fn panel_focus_handle(&self, cx: &App) -> FocusHandle {
@@ -759,6 +779,17 @@ impl Dock {
                             .ok();
                     }
                     PanelEvent::Activate => {
+                        if panel.workspace_item(window, cx).is_some() {
+                            let workspace = workspace.clone();
+                            window.defer(cx, move |window, cx| {
+                                workspace
+                                    .update(cx, |workspace, cx| {
+                                        workspace.focus_panel::<T>(window, cx);
+                                    })
+                                    .log_err();
+                            });
+                            return;
+                        }
                         if let Some(ix) = this
                             .panel_entries
                             .iter()
@@ -927,6 +958,10 @@ impl Dock {
 
     pub fn panels_len(&self) -> usize {
         self.panel_entries.len()
+    }
+
+    pub fn panel_handles(&self) -> impl Iterator<Item = &Arc<dyn PanelHandle>> {
+        self.panel_entries.iter().map(|entry| &entry.panel)
     }
 
     pub fn has_agent_panel(&self, cx: &App) -> bool {
@@ -1615,6 +1650,7 @@ pub mod test {
         pub default_size: Pixels,
         pub flexible: bool,
         pub activation_priority: u32,
+        pub agent: bool,
     }
     actions!(test_only, [ToggleTestPanel]);
 
@@ -1631,6 +1667,14 @@ pub mod test {
                 default_size: px(300.),
                 flexible: false,
                 activation_priority,
+                agent: false,
+            }
+        }
+
+        pub fn new_agent(position: DockPosition, activation_priority: u32, cx: &mut App) -> Self {
+            Self {
+                agent: true,
+                ..Self::new(position, activation_priority, cx)
             }
         }
 
@@ -1661,6 +1705,8 @@ pub mod test {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .id("test")
+                .debug_selector(|| "test-panel".into())
+                .size_full()
                 .track_focus(&self.focus_handle(cx))
                 .children(self.activation_focus_handle.iter().map(|focus_handle| {
                     div().id("test-activation-child").track_focus(focus_handle)
@@ -1750,6 +1796,10 @@ pub mod test {
 
         fn activation_priority(&self) -> u32 {
             self.activation_priority
+        }
+
+        fn is_agent_panel(&self) -> bool {
+            self.agent
         }
     }
 

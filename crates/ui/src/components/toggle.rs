@@ -350,6 +350,7 @@ pub struct Switch {
     tab_index: Option<isize>,
     aria_label: Option<SharedString>,
     aria_description: Option<SharedString>,
+    settings_style: bool,
 }
 
 impl Switch {
@@ -370,7 +371,13 @@ impl Switch {
             tab_index: None,
             aria_label: None,
             aria_description: None,
+            settings_style: false,
         }
+    }
+
+    pub fn settings_style(mut self) -> Self {
+        self.settings_style = true;
+        self
     }
 
     /// Sets the color of the switch using the specified [`SwitchColor`].
@@ -498,6 +505,13 @@ impl RenderOnce for Switch {
             .border_2()
             .border_color(cx.theme().colors().border_transparent)
             .rounded_full()
+            .when(self.settings_style, |this| {
+                this.p(px(2.)).border_1().bg(if is_on {
+                    gpui::rgb(0xA99ABD)
+                } else {
+                    gpui::rgb(0x424554)
+                })
+            })
             .when_some(
                 self.tab_index.filter(|_| !self.disabled),
                 |this, tab_index| {
@@ -517,6 +531,7 @@ impl RenderOnce for Switch {
                 h_flex()
                     .w(DynamicSpacing::Base32.rems(cx))
                     .h(DynamicSpacing::Base20.rems(cx))
+                    .when(self.settings_style, |this| this.w(px(28.)).h(px(14.)))
                     .group(group_id.clone())
                     .child(
                         h_flex()
@@ -531,12 +546,25 @@ impl RenderOnce for Switch {
                             })
                             .border_1()
                             .border_color(border_color)
+                            .when(self.settings_style, |this| {
+                                this.px_0()
+                                    .border_0()
+                                    .bg(gpui::transparent_black())
+                                    .group_hover(group_id.clone(), |this| {
+                                        this.bg(gpui::transparent_black())
+                                    })
+                            })
                             .child(
                                 div()
                                     .size(DynamicSpacing::Base12.rems(cx))
                                     .rounded_full()
                                     .bg(thumb_color)
-                                    .opacity(thumb_opacity),
+                                    .opacity(thumb_opacity)
+                                    .when(self.settings_style, |this| {
+                                        this.size(px(14.))
+                                            .bg(gpui::rgb(0xF5F2F9))
+                                            .opacity(if self.disabled { 0.2 } else { 1.0 })
+                                    }),
                             ),
                     ),
             );

@@ -636,6 +636,10 @@ impl Platform for TestPlatform {
 
     fn set_dock_menu(&self, _menu: Vec<crate::MenuItem>, _keymap: &Keymap) {}
 
+    fn set_status_item(&self, _title: Option<&str>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn add_recent_document(&self, _paths: &Path) {}
 
     fn on_app_menu_action(&self, _callback: Box<dyn FnMut(&dyn crate::Action)>) {}

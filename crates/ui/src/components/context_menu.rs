@@ -83,6 +83,7 @@ impl ContextMenuItem {
 pub struct ContextMenuEntry {
     toggle: Option<(IconPosition, bool)>,
     label: SharedString,
+    description: Option<SharedString>,
     icon: Option<IconName>,
     custom_icon_path: Option<SharedString>,
     custom_icon_svg: Option<SharedString>,
@@ -105,6 +106,7 @@ impl ContextMenuEntry {
         ContextMenuEntry {
             toggle: None,
             label: label.into(),
+            description: None,
             icon: None,
             custom_icon_path: None,
             custom_icon_svg: None,
@@ -125,6 +127,11 @@ impl ContextMenuEntry {
 
     pub fn toggleable(mut self, toggle_position: IconPosition, toggled: bool) -> Self {
         self.toggle = Some((toggle_position, toggled));
+        self
+    }
+
+    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
+        self.description = Some(description.into());
         self
     }
 
@@ -222,6 +229,7 @@ pub struct ContextMenu {
     _on_blur_subscription: Subscription,
     keep_open_on_confirm: bool,
     fixed_width: Option<DefiniteLength>,
+    dropdown_style: bool,
     main_menu: Option<Entity<ContextMenu>>,
     main_menu_observed_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     // Docs aide-related fields
@@ -330,6 +338,7 @@ impl ContextMenu {
                 _on_blur_subscription,
                 keep_open_on_confirm: false,
                 fixed_width: None,
+                dropdown_style: false,
                 main_menu: None,
                 main_menu_observed_bounds: Rc::new(Cell::new(None)),
                 documentation_aside: None,
@@ -417,6 +426,7 @@ impl ContextMenu {
                     _on_blur_subscription,
                     keep_open_on_confirm: true,
                     fixed_width: None,
+                    dropdown_style: false,
                     main_menu: None,
                     main_menu_observed_bounds: Rc::new(Cell::new(None)),
                     documentation_aside: None,
@@ -487,6 +497,7 @@ impl ContextMenu {
                 ),
                 keep_open_on_confirm: false,
                 fixed_width: None,
+                dropdown_style: false,
                 main_menu: None,
                 main_menu_observed_bounds: Rc::new(Cell::new(None)),
                 documentation_aside: None,
@@ -558,6 +569,7 @@ impl ContextMenu {
         handler: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
+            description: None,
             toggle: None,
             label: label.into(),
             handler: Rc::new(move |_, window, cx| handler(window, cx)),
@@ -589,6 +601,7 @@ impl ContextMenu {
         end_slot_handler: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
+            description: None,
             toggle: None,
             label: label.into(),
             handler: Rc::new(move |_, window, cx| handler(window, cx)),
@@ -620,6 +633,7 @@ impl ContextMenu {
         end_slot_handler: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
+            description: None,
             toggle: None,
             label: label.into(),
             handler: Rc::new(move |_, window, cx| handler(window, cx)),
@@ -664,6 +678,7 @@ impl ContextMenu {
         handler: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
+            description: None,
             toggle: Some((position, toggled)),
             label: label.into(),
             handler: Rc::new(move |_, window, cx| handler(window, cx)),
@@ -764,6 +779,7 @@ impl ContextMenu {
         disabled: bool,
     ) -> Self {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
+            description: None,
             toggle: if checked {
                 Some((IconPosition::Start, true))
             } else {
@@ -801,6 +817,7 @@ impl ContextMenu {
         action: Box<dyn Action>,
     ) -> Self {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
+            description: None,
             toggle: None,
             label: label.into(),
             action: Some(action.boxed_clone()),
@@ -838,6 +855,7 @@ impl ContextMenu {
         handler: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
+            description: None,
             toggle: None,
             label: label.into(),
             action: Some(action.boxed_clone()),
@@ -927,6 +945,12 @@ impl ContextMenu {
 
     pub fn fixed_width(mut self, width: DefiniteLength) -> Self {
         self.fixed_width = Some(width);
+        self
+    }
+
+    pub fn dropdown_style(mut self, width: Pixels) -> Self {
+        self.dropdown_style = true;
+        self.fixed_width = Some((width - px(2.)).into());
         self
     }
 
@@ -1324,6 +1348,7 @@ impl ContextMenu {
                 _on_blur_subscription,
                 keep_open_on_confirm: false,
                 fixed_width: None,
+                dropdown_style: false,
                 documentation_aside: None,
                 aside_trigger_bounds: Rc::new(RefCell::new(HashMap::default())),
                 main_menu: Some(parent_entity),
@@ -1471,9 +1496,22 @@ impl ContextMenu {
         let is_active_descendant = |selectable: bool| selectable && Some(ix) == self.selected_index;
         match item {
             ContextMenuItem::Separator => ListSeparator.into_any_element(),
-            ContextMenuItem::Header(header) => ListSubHeader::new(header.clone())
-                .inset(true)
-                .into_any_element(),
+            ContextMenuItem::Header(header) => {
+                if self.dropdown_style {
+                    h_flex()
+                        .h(px(32.))
+                        .px(px(12.))
+                        .text_size(px(11.))
+                        .line_height(px(16.))
+                        .text_color(cx.theme().colors().text_muted)
+                        .child(header.clone())
+                        .into_any_element()
+                } else {
+                    ListSubHeader::new(header.clone())
+                        .inset(true)
+                        .into_any_element()
+                }
+            }
             ContextMenuItem::HeaderWithLink(header, label, url) => {
                 let url = url.clone();
                 let link_id = ElementId::Name(format!("link-{}", url).into());
@@ -1824,6 +1862,7 @@ impl ContextMenu {
         let ContextMenuEntry {
             toggle,
             label,
+            description,
             handler,
             icon,
             custom_icon_path,
@@ -1968,7 +2007,13 @@ impl ContextMenu {
             .child(
                 ListItem::new(ix)
                     .group_name("label_container")
-                    .inset(true)
+                    .inset(!self.dropdown_style)
+                    .when(self.dropdown_style, |this| {
+                        this.height(px(if description.is_some() { 62. } else { 36. }))
+                            .corner_radius(px(6.))
+                            .horizontal_padding(px(12.))
+                            .selected_background(gpui::rgb(0x3A3548).into())
+                    })
                     .disabled(*disabled)
                     .aria_role(if toggle.is_some() {
                         Role::MenuItemCheckBox
@@ -1981,7 +2026,10 @@ impl ContextMenu {
                     .when_some(keyboard_shortcut, |item, keyboard_shortcut| {
                         item.aria_keyshortcuts(keyboard_shortcut)
                     })
-                    .toggle_state(Some(ix) == self.selected_index)
+                    .toggle_state(
+                        Some(ix) == self.selected_index
+                            || (self.dropdown_style && toggle.is_some_and(|(_, checked)| checked)),
+                    )
                     .when(self.main_menu.is_none() && !*disabled, |item| {
                         item.on_hover(cx.listener(move |this, hovered, window, cx| {
                             if *hovered {
@@ -2077,7 +2125,24 @@ impl ContextMenu {
                         h_flex()
                             .w_full()
                             .justify_between()
-                            .child(label_element)
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .when(description.is_some(), |this| {
+                                        this.min_h(px(46.)).justify_center().gap(px(4.))
+                                    })
+                                    .child(label_element)
+                                    .when_some(description.clone(), |this, description| {
+                                        this.child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .line_height(px(18.))
+                                                .text_color(cx.theme().colors().text_muted)
+                                                .child(description),
+                                        )
+                                    }),
+                            )
                             .debug_selector(|| format!("MENU_ITEM-{}", label))
                             .children(action.as_ref().map(|action| {
                                 let binding = self
@@ -2193,7 +2258,11 @@ impl ContextMenuItem {
 impl Render for ContextMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_settings = theme::theme_settings(cx);
-        let ui_font_size = theme_settings.ui_font_size(cx);
+        let ui_font_size = if self.dropdown_style {
+            px(13.)
+        } else {
+            theme_settings.ui_font_size(cx)
+        };
         let ui_font_family = theme_settings.ui_font(cx).family.clone();
         // Menus can be deferred from inside elements that override the text
         // style (e.g. the editor with a custom `buffer_line_height`), so always
@@ -2280,6 +2349,15 @@ impl Render for ContextMenu {
                 .line_height(line_height)
                 .elevation_2(cx)
                 .flex()
+                .when(self.dropdown_style, |this| {
+                    this.rounded(px(10.))
+                        .bg(gpui::rgb(0x292C39))
+                        .border_color(gpui::rgb(0x4B475B))
+                        .shadow(vec![
+                            gpui::BoxShadow::new(px(0.), px(10.), gpui::rgba(0x00000044).into())
+                                .blur_radius(px(30.)),
+                        ])
+                })
                 .flex_row()
                 .flex_shrink_0()
                 .child(
@@ -2360,14 +2438,24 @@ impl Render for ContextMenu {
                             }
                             el
                         })
-                        .child(
-                            List::new().children(
-                                self.items
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(ix, item)| self.render_menu_item(ix, item, window, cx)),
-                            ),
-                        ),
+                        .child(if self.dropdown_style {
+                            v_flex()
+                                .p(px(6.))
+                                .children(
+                                    self.items.iter().enumerate().map(|(ix, item)| {
+                                        self.render_menu_item(ix, item, window, cx)
+                                    }),
+                                )
+                                .into_any_element()
+                        } else {
+                            List::new()
+                                .children(
+                                    self.items.iter().enumerate().map(|(ix, item)| {
+                                        self.render_menu_item(ix, item, window, cx)
+                                    }),
+                                )
+                                .into_any_element()
+                        }),
                 )
         };
 

@@ -650,6 +650,7 @@ pub async fn connect(
         agent_id,
         project,
         command.clone(),
+        None,
         agent_server_store,
         default_mode,
         default_config_options,
@@ -807,17 +808,32 @@ impl AcpConnection {
         agent_id: AgentId,
         project: Entity<Project>,
         command: AgentServerCommand,
+        working_directory: Option<PathBuf>,
         agent_server_store: WeakEntity<AgentServerStore>,
         default_mode: Option<acp::SessionModeId>,
         default_config_options: HashMap<String, AgentConfigOptionValue>,
         cx: &mut AsyncApp,
     ) -> Result<Self> {
-        let root_dir = project.read_with(cx, |project, cx| {
-            project
-                .default_path_list(cx)
-                .ordered_paths()
-                .next()
-                .cloned()
+        let configured_directory = working_directory.or(cx.update(|cx| {
+            cx.global::<settings::SettingsStore>()
+                .get::<project::agent_server_store::AllAgentServersSettings>(None)
+                .get(agent_id.as_ref())
+                .and_then(|settings| match settings {
+                    project::agent_server_store::CustomAgentServerSettings::Custom {
+                        working_directory,
+                        ..
+                    } => working_directory.clone(),
+                    _ => None,
+                })
+        }));
+        let root_dir = configured_directory.or_else(|| {
+            project.read_with(cx, |project, cx| {
+                project
+                    .default_path_list(cx)
+                    .ordered_paths()
+                    .next()
+                    .cloned()
+            })
         });
         let original_command = command.clone();
         let (path, args, env) = project
@@ -3518,6 +3534,7 @@ mod tests {
                     "test".to_string(),
                     settings::CustomAgentServerSettings::Custom {
                         path: PathBuf::from("test-agent"),
+                        working_directory: None,
                         args: Vec::new(),
                         env: HashMap::default(),
                         default_mode: Some("manual".to_string()),
@@ -3747,6 +3764,7 @@ mod tests {
             AgentId::new("test-agent"),
             project,
             command,
+            None,
             agent_server_store,
             None,
             HashMap::default(),

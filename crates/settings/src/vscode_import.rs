@@ -1032,6 +1032,11 @@ impl VsCodeSettings {
 
     fn workspace_settings_content(&self) -> WorkspaceSettingsContent {
         WorkspaceSettingsContent {
+            app_language: None,
+            default_file_open_destination: None,
+            projectless_task_folder: None,
+            show_bottom_panel_button: None,
+            show_in_menu_bar: None,
             active_pane_modifiers: self.active_pane_modifiers(),
             accessible_mode: None,
             text_rendering_mode: None,

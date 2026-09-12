@@ -70,7 +70,10 @@ impl<D: PickerDelegate> Render for Picker<D> {
         // off.
         let has_preview = self.preview.is_some();
         let content = div()
-            .when(self.draws_own_container(), |this| this.elevation_3(cx))
+            .when(
+                self.draws_own_container() && !self.delegate.dropdown_style(),
+                |this| this.elevation_3(cx),
+            )
             .when(has_preview, |this| this.overflow_hidden())
             .child(content);
 
@@ -103,6 +106,29 @@ impl<D: PickerDelegate> Picker<D> {
             return custom;
         }
         let editor_position = self.delegate.editor_position();
+
+        if self.delegate.dropdown_style() {
+            return h_flex()
+                .h(px(40.))
+                .px(px(12.))
+                .gap(px(9.))
+                .flex_none()
+                .border_b_1()
+                .border_color(gpui::rgb(0x464354))
+                .child(
+                    Icon::new(IconName::MagnifyingGlass)
+                        .size(IconSize::Custom(rems_from_px(16_f32)))
+                        .color(Color::Muted),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(13.))
+                        .line_height(px(16.))
+                        .child(editor.render(window, cx)),
+                )
+                .children(self.delegate.searchbar_trailer(window, cx));
+        }
 
         v_flex()
             .when(editor_position == PickerEditorPosition::End, |this| {
@@ -165,6 +191,28 @@ impl<D: PickerDelegate> Picker<D> {
         let menu = v_flex()
             .key_context(key_context)
             .relative()
+            .when(self.delegate.dropdown_style(), |this| {
+                this.p(px(6.))
+                    .rounded(px(10.))
+                    .bg(gpui::rgb(0x292C39))
+                    .border_1()
+                    .border_color(gpui::rgb(0x4B475B))
+                    .shadow(vec![
+                        gpui::BoxShadow::new(px(0.), px(10.), gpui::rgba(0x00000044).into())
+                            .blur_radius(px(30.)),
+                    ])
+            })
+            .when(self.delegate.project_switcher_style(), |this| {
+                this.p_0()
+                    .rounded(px(12.))
+                    .overflow_hidden()
+                    .bg(gpui::rgb(0x292B39))
+                    .border_color(gpui::rgb(0x505061))
+                    .shadow(vec![
+                        gpui::BoxShadow::new(px(0.), px(12.), gpui::rgba(0x00000055).into())
+                            .blur_radius(px(36.)),
+                    ])
+            })
             .map(|this| {
                 self.shape.apply_results_size(
                     self.preview_layout_rendered(window),

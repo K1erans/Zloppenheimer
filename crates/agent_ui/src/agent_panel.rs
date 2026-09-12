@@ -100,7 +100,7 @@ use workspace::{
     CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, PathList, SerializedPathList,
     ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
     dock::{DockPosition, Panel, PanelEvent},
-    item::{ItemEvent, ItemHandle},
+    item::{Item, ItemEvent, ItemHandle, TabContentParams},
 };
 
 const AGENT_PANEL_KEY: &str = "agent_panel";
@@ -1164,11 +1164,13 @@ pub struct AgentPanel {
     context_server_registry: Entity<ContextServerRegistry>,
     focus_handle: FocusHandle,
     base_view: BaseView,
+    hosted_in_workspace: bool,
     last_created_entry_kind: AgentPanelEntryKind,
     draft_thread: Option<Entity<ConversationView>>,
     retained_threads: HashMap<ThreadId, Entity<ConversationView>>,
     terminals: HashMap<TerminalId, AgentTerminal>,
     pending_terminal_spawn: Option<TerminalId>,
+    preparing_projectless_task: bool,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
     _extension_subscription: Option<Subscription>,
@@ -1493,7 +1495,7 @@ impl AgentPanel {
         })
     }
 
-    pub(crate) fn new(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let fs = workspace.app_state().fs.clone();
         let user_store = workspace.app_state().user_store.clone();
         let project = workspace.project();
@@ -1568,6 +1570,7 @@ impl AgentPanel {
         let panel = Self {
             workspace_id,
             base_view,
+            hosted_in_workspace: false,
             last_created_entry_kind: AgentPanelEntryKind::Thread,
             workspace,
             user_store,
@@ -1582,6 +1585,7 @@ impl AgentPanel {
             retained_threads: HashMap::default(),
             terminals: HashMap::default(),
             pending_terminal_spawn: None,
+            preparing_projectless_task: false,
             new_thread_menu_handle: PopoverMenuHandle::default(),
             agent_panel_menu_handle: PopoverMenuHandle::default(),
 
@@ -1604,6 +1608,15 @@ impl AgentPanel {
         };
 
         panel.ensure_native_agent_connection(cx);
+        cx.on_focus(&panel.focus_handle, window, |panel, window, cx| {
+            if panel.hosted_in_workspace {
+                let target = panel.activation_focus_handle(cx);
+                if target != panel.focus_handle {
+                    target.focus(window, cx);
+                }
+            }
+        })
+        .detach();
         panel
     }
 
@@ -1757,7 +1770,11 @@ impl AgentPanel {
             .map(|panel| {
                 let panel_id = Entity::entity_id(&panel);
 
-                workspace_read.all_docks().iter().any(|dock| {
+                workspace_read.panes().iter().any(|pane| {
+                    pane.read(cx)
+                        .active_item()
+                        .is_some_and(|item| item.item_id() == panel_id)
+                }) || workspace_read.all_docks().iter().any(|dock| {
                     dock.read(cx)
                         .visible_panel()
                         .is_some_and(|visible_panel| visible_panel.panel_id() == panel_id)
@@ -1778,6 +1795,7 @@ impl AgentPanel {
 
     pub fn new_thread(&mut self, _action: &NewThread, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_open_project(cx) {
+            self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
             return;
         }
 
@@ -1797,6 +1815,80 @@ impl AgentPanel {
         }
     }
 
+    fn prepare_projectless_task(
+        &mut self,
+        focus: bool,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.preparing_projectless_task || !self.project.read(cx).is_local() {
+            return;
+        }
+
+        let folder = workspace::WorkspaceSettings::get_global(cx)
+            .projectless_task_folder
+            .clone();
+        let folder = if folder == "~" {
+            paths::home_dir().clone()
+        } else if let Some(relative_folder) = folder.strip_prefix("~/") {
+            paths::home_dir().join(relative_folder)
+        } else {
+            PathBuf::from(folder)
+        };
+        if !folder.is_absolute() {
+            self.workspace
+                .update(cx, |workspace, cx| {
+                    workspace.show_error(
+                        anyhow!(
+                            "Projectless task folder must be an absolute path or start with ~/"
+                        ),
+                        cx,
+                    );
+                })
+                .log_err();
+            return;
+        }
+        let task_folder = folder.join(format!("task-{}", uuid::Uuid::new_v4()));
+        let fs = self.fs.clone();
+        self.preparing_projectless_task = true;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = async {
+                fs.create_dir(&task_folder).await.with_context(|| {
+                    format!("Could not create task folder {}", task_folder.display())
+                })?;
+                let worktree_task = this.update(cx, |this, cx| {
+                    if this.has_open_project(cx) {
+                        return None;
+                    }
+                    Some(this.project.update(cx, |project, cx| {
+                        project.find_or_create_worktree(&task_folder, true, cx)
+                    }))
+                })?;
+                if let Some(worktree_task) = worktree_task {
+                    worktree_task.await?;
+                }
+                anyhow::Ok(())
+            }
+            .await;
+            this.update_in(cx, |this, window, cx| {
+                this.preparing_projectless_task = false;
+                match result {
+                    Ok(()) => this.activate_new_thread(focus, source, window, cx),
+                    Err(error) => {
+                        log::error!("Failed to start projectless task: {error:#}");
+                        this.workspace
+                            .update(cx, |workspace, cx| workspace.show_error(error, cx))
+                            .log_err();
+                    }
+                }
+                cx.notify();
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
     pub fn activate_new_thread(
         &mut self,
         focus: bool,
@@ -1805,6 +1897,7 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         if !self.has_open_project(cx) {
+            self.prepare_projectless_task(focus, source, window, cx);
             return;
         }
 
@@ -1950,10 +2043,6 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_open_project(cx) {
-            return;
-        }
-
         self.selected_agent = action.agent.clone().into();
         self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
     }
@@ -3709,6 +3798,19 @@ impl AgentPanel {
     }
 
     pub fn toggle_zoom(&mut self, _: &ToggleZoom, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hosted_in_workspace {
+            let workspace = self.workspace.clone();
+            window.defer(cx, move |window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        workspace.active_pane().update(cx, |pane, cx| {
+                            pane.toggle_zoom(&ToggleZoom, window, cx);
+                        });
+                    })
+                    .log_err();
+            });
+            return;
+        }
         if self.zoomed {
             cx.emit(PanelEvent::ZoomOut);
         } else {
@@ -4288,6 +4390,16 @@ impl AgentPanel {
 
         if focus {
             self.activation_focus_handle(cx).focus(window, cx);
+            if self.hosted_in_workspace {
+                let workspace = self.workspace.clone();
+                window.defer(cx, move |window, cx| {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.focus_panel::<AgentPanel>(window, cx);
+                        })
+                        .log_err();
+                });
+            }
         }
         cx.emit(AgentPanelEvent::ActiveViewChanged);
     }
@@ -4997,6 +5109,53 @@ pub enum AgentPanelEvent {
 impl EventEmitter<PanelEvent> for AgentPanel {}
 impl EventEmitter<AgentPanelEvent> for AgentPanel {}
 
+impl Item for AgentPanel {
+    type Event = AgentPanelEvent;
+
+    fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
+        match self.visible_surface() {
+            VisibleSurface::AgentThread(conversation) if self.active_thread_has_messages(cx) => {
+                conversation.read(cx).title(cx)
+            }
+            VisibleSurface::Terminal(terminal) => terminal.read(cx).tab_content_text(0, cx),
+            _ => "New thread".into(),
+        }
+    }
+
+    fn tab_content(&self, params: TabContentParams, _window: &Window, cx: &App) -> AnyElement {
+        div()
+            .min_w_0()
+            .truncate()
+            .text_size(px(13.))
+            .line_height(px(18.))
+            .text_color(params.text_color().color(cx))
+            .child(self.tab_content_text(0, cx))
+            .into_any_element()
+    }
+
+    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
+        let icon = if matches!(self.base_view, BaseView::Terminal { .. }) {
+            IconName::Terminal
+        } else {
+            IconName::Thread
+        };
+        Some(Icon::new(icon).size(IconSize::Small))
+    }
+
+    fn show_toolbar(&self) -> bool {
+        false
+    }
+
+    fn to_item_events(event: &Self::Event, emit: &mut dyn FnMut(ItemEvent)) {
+        if matches!(
+            event,
+            AgentPanelEvent::ActiveViewChanged | AgentPanelEvent::EntryChanged
+        ) {
+            emit(ItemEvent::UpdateTab);
+        }
+    }
+}
+
 impl Panel for AgentPanel {
     fn persistent_name() -> &'static str {
         "AgentPanel"
@@ -5004,6 +5163,15 @@ impl Panel for AgentPanel {
 
     fn panel_key() -> &'static str {
         AGENT_PANEL_KEY
+    }
+
+    fn workspace_item(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Box<dyn ItemHandle>> {
+        self.hosted_in_workspace = true;
+        Some(Box::new(cx.entity()))
     }
 
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
@@ -6544,7 +6712,9 @@ impl Render for AgentPanel {
                     })
                 }
             }))
-            .child(self.render_toolbar(window, cx))
+            .when(!self.hosted_in_workspace, |parent| {
+                parent.child(self.render_toolbar(window, cx))
+            })
             .children(self.render_new_user_onboarding(window, cx))
             .map(|parent| match self.visible_surface() {
                 VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
@@ -6909,6 +7079,7 @@ mod tests {
                     id.to_string(),
                     settings::CustomAgentServerSettings::Custom {
                         path: PathBuf::from("/usr/bin/fake-agent"),
+                        working_directory: None,
                         args: Vec::new(),
                         env: Default::default(),
                         default_mode: None,

@@ -89,6 +89,7 @@ pub struct SplitEditorView {
     splittable_editor: Entity<SplittableEditor>,
     style: EditorStyle,
     split_state: Entity<SplitEditorState>,
+    review_gutter: bool,
 }
 
 impl SplitEditorView {
@@ -101,7 +102,13 @@ impl SplitEditorView {
             splittable_editor,
             style,
             split_state,
+            review_gutter: false,
         }
+    }
+
+    pub(crate) fn review_gutter(mut self, enabled: bool) -> Self {
+        self.review_gutter = enabled;
+        self
     }
 }
 
@@ -154,8 +161,10 @@ impl RenderOnce for SplitEditorView {
         let lhs_editor = splittable_editor.lhs_editor().unwrap().clone();
         let rhs_editor = splittable_editor.rhs_editor().clone();
 
-        let mut lhs = EditorElement::new(&lhs_editor, self.style.clone());
-        let mut rhs = EditorElement::new(&rhs_editor, self.style.clone());
+        let mut lhs =
+            EditorElement::new(&lhs_editor, self.style.clone()).review_gutter(self.review_gutter);
+        let mut rhs =
+            EditorElement::new(&rhs_editor, self.style.clone()).review_gutter(self.review_gutter);
 
         lhs.set_split_side(SplitSide::Left);
         rhs.set_split_side(SplitSide::Right);

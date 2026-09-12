@@ -13,8 +13,8 @@ use settings::{
     AgentConfigOptionValue, CustomAgentServerSettings, SettingsStore, update_settings_file,
 };
 use ui::{
-    AiSettingItem, AiSettingItemSource, AiSettingItemStatus, ContextMenu, ContextMenuEntry,
-    Divider, PopoverMenu, Tooltip, prelude::*,
+    AiSettingItem, AiSettingItemSource, AiSettingItemStatus, ButtonLike, ContextMenu,
+    ContextMenuEntry, Divider, PopoverMenu, Tooltip, prelude::*,
 };
 use util::ResultExt as _;
 use workspace::{MultiWorkspace, Workspace, create_and_open_local_file};
@@ -99,7 +99,7 @@ fn collect_agents(store: &Entity<AgentServerStore>, cx: &App) -> Vec<AgentRow> {
 /// can be pre-filled. Reading the parsed settings (rather than the resolved
 /// runtime server) keeps this resilient to malformed `settings.json`: the
 /// settings layer drops individual bad fields instead of failing.
-fn custom_agent_settings(id: &AgentId, cx: &App) -> Option<CustomAgentServerSettings> {
+pub(super) fn custom_agent_settings(id: &AgentId, cx: &App) -> Option<CustomAgentServerSettings> {
     SettingsStore::global(cx)
         .get_content_for_file(settings::SettingsFile::User)?
         .agent_servers
@@ -223,7 +223,7 @@ fn render_agent(
     .action(remove_button)
 }
 
-fn remove_agent(id: &AgentId, source: ExternalAgentSource, cx: &mut App) {
+pub(super) fn remove_agent(id: &AgentId, source: ExternalAgentSource, cx: &mut App) {
     let fs = <dyn fs::Fs>::global(cx);
     let id = id.clone();
     update_settings_file(fs, cx, move |settings, _| {
@@ -329,20 +329,20 @@ struct KeyValueRow {
 pub(crate) struct CustomAgentForm {
     /// `Some` when editing an existing agent (used to remove the old entry on rename).
     original_id: Option<AgentId>,
+    registry: bool,
     name: Entity<Editor>,
     command: Entity<Editor>,
     args: Entity<Editor>,
+    working_directory: Entity<Editor>,
+    connection_test: Option<gpui::Task<()>>,
+    connection_test_result: Option<SharedString>,
+    modal_focus: FocusHandle,
     env: Vec<KeyValueRow>,
     /// Advanced fields not surfaced by the form. They're preserved verbatim so
     /// editing the basic settings doesn't drop a user's hand-written config.
     default_mode: Option<String>,
     default_config_options: HashMap<String, AgentConfigOptionValue>,
     favorite_config_option_values: HashMap<String, Vec<String>>,
-    /// Stable handles for the Cancel/Save buttons so they can render a focus
-    /// ring. `Filled`/`Subtle` buttons only get a subtle `focus_visible`
-    /// background change otherwise, which is hard to see.
-    cancel_focus_handle: FocusHandle,
-    save_focus_handle: FocusHandle,
     error: Option<SharedString>,
 }
 
@@ -353,10 +353,15 @@ impl CustomAgentForm {
         cx: &mut Context<SettingsWindow>,
     ) -> Self {
         let original_id = existing.as_ref().map(|(id, _)| id.clone());
+        let registry = existing.as_ref().is_some_and(|(_, settings)| {
+            matches!(settings, CustomAgentServerSettings::Registry { .. })
+        });
         let name_initial = original_id.as_ref().map(|id| id.0.to_string());
 
         let mut command_initial = None;
         let mut args_initial = None;
+        let mut directory_initial = None;
+        let mut initialization_error = None;
         let mut env = Vec::new();
         let mut default_mode = None;
         let mut default_config_options = HashMap::default();
@@ -368,6 +373,7 @@ impl CustomAgentForm {
             match settings {
                 CustomAgentServerSettings::Custom {
                     path,
+                    working_directory,
                     args,
                     env: env_map,
                     default_mode: mode,
@@ -375,8 +381,18 @@ impl CustomAgentForm {
                     favorite_config_option_values: favorites,
                 } => {
                     command_initial = Some(path.to_string_lossy().to_string());
+                    directory_initial = working_directory
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string());
                     if !args.is_empty() {
-                        args_initial = Some(args.join(" "));
+                        match shlex::try_join(args.iter().map(String::as_str)) {
+                            Ok(arguments) => args_initial = Some(arguments),
+                            Err(error) => {
+                                initialization_error = Some(
+                                    format!("Could not load command arguments: {error}").into(),
+                                )
+                            }
+                        }
                     }
                     for (key, value) in sorted_pairs(env_map) {
                         env.push(new_kv_row(Some(&key), Some(&value), window, cx));
@@ -403,16 +419,35 @@ impl CustomAgentForm {
 
         Self {
             original_id,
-            name: new_input("my-agent", name_initial.as_deref(), window, cx),
-            command: new_input("/path/to/agent", command_initial.as_deref(), window, cx),
-            args: new_input("--flag value", args_initial.as_deref(), window, cx),
+            registry,
+            name: new_input("My ACP agent", name_initial.as_deref(), window, cx),
+            command: new_input(
+                "Path to agent executable…",
+                command_initial.as_deref(),
+                window,
+                cx,
+            ),
+            args: new_input(
+                "Add command arguments…",
+                args_initial.as_deref(),
+                window,
+                cx,
+            ),
+            working_directory: new_input(
+                "Use project directory",
+                directory_initial.as_deref(),
+                window,
+                cx,
+            ),
+            connection_test: None,
+            connection_test_result: None,
+            modal_focus: cx.focus_handle(),
             env,
             default_mode,
             default_config_options,
             favorite_config_option_values,
-            cancel_focus_handle: cx.focus_handle(),
-            save_focus_handle: cx.focus_handle(),
-            error: None,
+
+            error: initialization_error,
         }
     }
 }
@@ -436,6 +471,11 @@ fn new_input(
     let initial = initial.map(|text| text.to_string());
     cx.new(|cx| {
         let mut editor = Editor::single_line(window, cx);
+        editor.set_text_style_refinement(gpui::TextStyleRefinement {
+            font_size: Some(rems_from_px(12_f32).into()),
+            line_height: Some(gpui::relative(16. / 12.)),
+            ..Default::default()
+        });
         editor.set_placeholder_text(placeholder.as_str(), window, cx);
         if let Some(text) = initial {
             editor.set_text(text, window, cx);
@@ -463,188 +503,299 @@ pub(crate) fn open_custom_agent_form(
     window: &mut Window,
     cx: &mut Context<SettingsWindow>,
 ) {
-    let is_edit = existing.is_some();
     settings_window.custom_agent_form = Some(CustomAgentForm::new(existing, window, cx));
-
-    let title = if is_edit {
-        "Configure External Agent"
-    } else {
-        "Add Custom Agent"
-    };
-
-    settings_window.push_dynamic_sub_page(
-        title,
-        "Agent Configuration",
-        Some("agent_servers"),
-        false,
-        render_custom_agent_form_page,
-        window,
-        cx,
-    );
+    if let Some(form) = &settings_window.custom_agent_form {
+        form.name.focus_handle(cx).focus(window, cx);
+    }
+    cx.notify();
 }
 
-fn render_custom_agent_form_page(
+pub(crate) fn render_custom_agent_modal(
     settings_window: &SettingsWindow,
-    scroll_handle: &ScrollHandle,
     window: &mut Window,
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
+    use super::ai_page::text;
     let Some(form) = settings_window.custom_agent_form.as_ref() else {
-        return div().into_any_element();
+        return gpui::Empty.into_any_element();
     };
-    let error = form.error.clone();
-
-    let fields = v_flex()
-        .w_full()
-        .gap_4()
+    let fields = [
+        ("Display name", &form.name),
+        ("Command", &form.command),
+        ("Arguments", &form.args),
+        ("Working directory", &form.working_directory),
+    ]
+    .into_iter()
+    .filter(|_| !form.registry)
+    .map(|(label, editor)| {
+        v_flex()
+            .gap(px(7.))
+            .child(text(ui::localized(label, cx), 12., 16., 0xD6D1E1))
+            .child(input_box(editor, cx))
+    });
+    let testing = form.connection_test.is_some();
+    let modal = v_flex()
+        .id("custom-agent-modal")
+        .role(gpui::Role::Dialog)
+        .aria_label("Add custom ACP agent")
+        .track_focus(&form.modal_focus)
+        .on_action(cx.listener(|this, _: &menu::SelectNext, window, cx| {
+            cx.stop_propagation();
+            window.focus_next(cx);
+            if let Some(form) = &this.custom_agent_form
+                && !form.modal_focus.contains_focused(window, cx)
+            {
+                form.modal_focus.focus(window, cx);
+                window.focus_next(cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &menu::SelectPrevious, window, cx| {
+            cx.stop_propagation();
+            window.focus_prev(cx);
+            if let Some(form) = &this.custom_agent_form
+                && !form.modal_focus.contains_focused(window, cx)
+            {
+                form.modal_focus.focus(window, cx);
+                window.focus_prev(cx);
+            }
+        }))
+        .w(px(540.))
+        .max_w_full()
+        .p(px(24.))
+        .gap(px(18.))
+        .bg(gpui::rgb(0x292C39))
+        .border_1()
+        .border_color(gpui::rgb(0x554C62))
+        .rounded(px(12.))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {
+            this.custom_agent_form = None;
+            cx.notify();
+        }))
         .child(
-            crate::render_settings_item_layout(
-                settings_window,
-                "Agent Name",
-                "Required. A unique name used to identify this agent.",
-                input_box(&form.name, cx).into_any_element(),
-                None,
-                None,
-                None,
-                false,
-                cx,
-            )
-            .into_any_element(),
+            h_flex()
+                .justify_between()
+                .child(text(
+                    if form.original_id.is_some() {
+                        "Configure ACP agent"
+                    } else {
+                        "Add custom ACP agent"
+                    },
+                    20.,
+                    24.,
+                    0xE5E0EE,
+                ))
+                .child(
+                    ButtonLike::new("close-custom-agent")
+                        .size(ButtonSize::None)
+                        .child(text(ui::localized("×", cx), 16., 20., 0xACA6B9))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.custom_agent_form = None;
+                            cx.notify();
+                        })),
+                ),
         )
+        .children(fields)
         .child(
-            crate::render_settings_item_layout(
-                settings_window,
-                "Command",
-                "Required. Path to the executable that launches the agent.",
-                input_box(&form.command, cx).into_any_element(),
-                None,
-                None,
-                None,
-                false,
-                cx,
-            )
-            .into_any_element(),
+            h_flex()
+                .justify_between()
+                .child(text(
+                    ui::localized("Environment variables", cx),
+                    12.,
+                    16.,
+                    0xD6D1E1,
+                ))
+                .child(
+                    ButtonLike::new("custom-agent-env-add")
+                        .size(ButtonSize::None)
+                        .child(text(
+                            ui::localized("＋ Add variable", cx),
+                            12.,
+                            16.,
+                            0xCDBBDF,
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let row = new_kv_row(None, None, window, cx);
+                            row.key.focus_handle(cx).focus(window, cx);
+                            if let Some(form) = this.custom_agent_form.as_mut() {
+                                form.env.push(row);
+                            }
+                            cx.notify();
+                        })),
+                ),
         )
+        .children(form.env.iter().enumerate().map(|(index, row)| {
+            h_flex()
+                .gap(px(8.))
+                .child(div().flex_1().min_w_0().child(input_box(&row.key, cx)))
+                .child(div().flex_1().min_w_0().child(input_box(&row.value, cx)))
+                .child(
+                    IconButton::new(("remove-env", index), IconName::Close).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            if let Some(form) = this.custom_agent_form.as_mut()
+                                && index < form.env.len()
+                            {
+                                form.env.remove(index);
+                            }
+                            cx.notify();
+                        },
+                    )),
+                )
+        }))
+        .when_some(form.error.clone(), |this, error| {
+            this.child(render_form_error(error))
+        })
+        .when_some(form.connection_test_result.clone(), |this, result| {
+            this.child(text(result, 12., 16., 0xCDBBDF))
+        })
         .child(
-            crate::render_settings_item_layout(
-                settings_window,
-                "Arguments",
-                "Space-separated arguments passed to the command.",
-                input_box(&form.args, cx).into_any_element(),
-                None,
-                None,
-                None,
-                false,
-                cx,
-            )
-            .into_any_element(),
-        )
-        .child(render_env_section(settings_window, &form.env, cx))
-        .when_some(error, |this, error| this.child(render_form_error(error)))
-        .child(render_form_actions(form, window, cx));
-
-    v_flex()
-        .id("custom-agent-form-page")
-        .size_full()
-        .pt_2p5()
-        .px_8()
-        .pb_16()
-        .track_scroll(scroll_handle)
-        .overflow_y_scroll()
-        .child(fields)
+            h_flex()
+                .gap(px(10.))
+                .pt(px(8.))
+                .child(
+                    ButtonLike::new("test-custom-agent")
+                        .size(ButtonSize::None)
+                        .disabled(testing || form.registry)
+                        .child(text(
+                            if testing {
+                                "Connecting…"
+                            } else {
+                                "Test connection"
+                            },
+                            12.,
+                            16.,
+                            0xCCBDD9,
+                        ))
+                        .on_click(cx.listener(test_custom_agent_form)),
+                )
+                .child(div().flex_1())
+                .child(
+                    ButtonLike::new("cancel-custom-agent")
+                        .size(ButtonSize::None)
+                        .child(text(ui::localized("Cancel", cx), 12., 16., 0xC3BED0))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.custom_agent_form = None;
+                            cx.notify();
+                        }))
+                        .custom_style(|this| this.px(px(12.)).py(px(8.))),
+                )
+                .child(
+                    ButtonLike::new("save-custom-agent")
+                        .size(ButtonSize::None)
+                        .background((gpui::rgb(0x493D57)).into())
+                        .corner_radius(px(6.))
+                        .child(text(
+                            if form.original_id.is_some() {
+                                "Save"
+                            } else {
+                                "Add agent"
+                            },
+                            12.,
+                            16.,
+                            0xEFE7F6,
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            save_custom_agent_form(this, window, cx)
+                        }))
+                        .custom_style(|this| {
+                            this.px(px(13.))
+                                .py(px(8.))
+                                .border_1()
+                                .border_color(gpui::rgb(0x695B79))
+                        }),
+                ),
+        );
+    let _ = window;
+    div()
+        .absolute()
+        .inset_0()
+        .top(px(36.))
+        .bg(gpui::rgba(0x11131C99))
+        .flex()
+        .justify_center()
+        .items_start()
+        .pt(px(154.))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(modal)
         .into_any_element()
 }
 
-fn input_box(editor: &Entity<Editor>, cx: &App) -> impl IntoElement {
-    let colors = cx.theme().colors();
-    // All form inputs share tab index 0, so tab order follows render (insertion)
-    // order. Tracking the editor's focus handle makes the field a tab stop and
-    // routes keyboard focus into the editor when tabbed to.
-    let focus_handle = editor.focus_handle(cx).tab_index(0).tab_stop(true);
-    h_flex()
-        .min_w_64()
-        .py_1()
-        .px_2()
-        .h_8()
-        .rounded_md()
-        .border_1()
-        .border_color(colors.border)
-        .bg(colors.editor_background)
-        .track_focus(&focus_handle)
-        .focus(|style| style.border_color(colors.border_focused))
-        .child(editor.clone())
+fn test_custom_agent_form(
+    this: &mut SettingsWindow,
+    _: &gpui::ClickEvent,
+    _window: &mut Window,
+    cx: &mut Context<SettingsWindow>,
+) {
+    let Some(form) = this.custom_agent_form.as_ref() else {
+        return;
+    };
+    let configuration = match build_settings_from_form(form, cx) {
+        Ok((_, _, configuration)) => configuration,
+        Err(error) => {
+            if let Some(form) = this.custom_agent_form.as_mut() {
+                form.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+    };
+    let Some(project) = this.active_project(cx) else {
+        if let Some(form) = this.custom_agent_form.as_mut() {
+            form.error = Some("Open a workspace to test this connection.".into());
+        }
+        cx.notify();
+        return;
+    };
+    let connection = agent_servers::test_custom_agent_connection(configuration, project, cx);
+    let task = cx.spawn(async move |this, cx| {
+        use futures::{FutureExt, select_biased};
+        let timeout = cx
+            .background_executor()
+            .timer(std::time::Duration::from_secs(20));
+        let result = select_biased! {
+            result = connection.fuse() => result,
+            _ = timeout.fuse() => Err(anyhow::anyhow!("Connection timed out after 20 seconds")),
+        };
+        this.update(cx, |this, cx| {
+            if let Some(form) = this.custom_agent_form.as_mut() {
+                form.connection_test = None;
+                match result {
+                    Ok(()) => {
+                        form.error = None;
+                        form.connection_test_result = Some("ACP connection succeeded.".into());
+                    }
+                    Err(error) => {
+                        form.connection_test_result = None;
+                        form.error = Some(error.to_string().into());
+                    }
+                }
+                cx.notify();
+            }
+        })
+        .log_err();
+    });
+    if let Some(form) = this.custom_agent_form.as_mut() {
+        form.error = None;
+        form.connection_test_result = None;
+        form.connection_test = Some(task);
+    }
+    cx.notify();
 }
 
-fn render_env_section(
-    settings_window: &SettingsWindow,
-    rows: &[KeyValueRow],
-    cx: &mut Context<SettingsWindow>,
-) -> impl IntoElement {
-    // The right-hand control column is narrower than a full row, so each
-    // variable stacks its key above its value (with the remove affordance next
-    // to the value) to stay readable.
-    let control = v_flex()
-        .min_w_64()
-        .gap_2()
-        .children(rows.iter().enumerate().map(|(ix, row)| {
-            v_flex().gap_1().child(input_box(&row.key, cx)).child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(input_box(&row.value, cx))
-                    .child(
-                        IconButton::new(("custom-agent-env-remove", ix), IconName::Close)
-                            .icon_size(IconSize::Small)
-                            .icon_color(Color::Muted)
-                            .tab_index(0isize)
-                            .tooltip(Tooltip::text("Remove"))
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                if let Some(form) = this.custom_agent_form.as_mut()
-                                    && ix < form.env.len()
-                                {
-                                    form.env.remove(ix);
-                                }
-                                cx.notify();
-                            })),
-                    ),
-            )
-        }))
-        .child(
-            Button::new("custom-agent-env-add", "Add")
-                .style(ButtonStyle::Outlined)
-                .label_size(LabelSize::Small)
-                .tab_index(0isize)
-                .start_icon(
-                    Icon::new(IconName::Plus)
-                        .size(IconSize::Small)
-                        .color(Color::Muted),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    let row = new_kv_row(None, None, window, cx);
-                    // Focus the new key so the user can type immediately and tab
-                    // through the new row (key -> value -> ... -> Add button).
-                    let key_handle = row.key.focus_handle(cx);
-                    if let Some(form) = this.custom_agent_form.as_mut() {
-                        form.env.push(row);
-                    }
-                    key_handle.focus(window, cx);
-                    cx.notify();
-                })),
-        )
-        .into_any_element();
-
-    crate::render_settings_item_layout(
-        settings_window,
-        "Environment Variables",
-        "Environment variables provided to the agent process.",
-        control,
-        None,
-        None,
-        None,
-        false,
-        cx,
-    )
-    .into_any_element()
+fn input_box(editor: &Entity<Editor>, cx: &App) -> impl IntoElement {
+    let focus_handle = editor.focus_handle(cx).tab_index(0).tab_stop(true);
+    h_flex()
+        .w_full()
+        .min_h(px(38.))
+        .py(px(10.))
+        .px(px(12.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(gpui::rgb(0x484959))
+        .bg(gpui::rgb(0x252833))
+        .track_focus(&focus_handle)
+        .focus(|style| style.border_color(gpui::rgb(0xA99ABD)))
+        .child(editor.clone())
 }
 
 fn render_form_error(error: SharedString) -> impl IntoElement {
@@ -660,52 +811,6 @@ fn render_form_error(error: SharedString) -> impl IntoElement {
         .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
 }
 
-fn render_form_actions(
-    form: &CustomAgentForm,
-    window: &mut Window,
-    cx: &mut Context<SettingsWindow>,
-) -> impl IntoElement {
-    let cancel_handle = form.cancel_focus_handle.clone().tab_index(0).tab_stop(true);
-    let save_handle = form.save_focus_handle.clone().tab_index(0).tab_stop(true);
-    let cancel_border = focus_ring_color(&cancel_handle, window, cx);
-    let save_border = focus_ring_color(&save_handle, window, cx);
-
-    h_flex()
-        .w_full()
-        .gap_2()
-        .justify_end()
-        .pt_2()
-        .child(
-            div()
-                .rounded_md()
-                .border_1()
-                .border_color(cancel_border)
-                .child(
-                    Button::new("custom-agent-form-cancel", "Cancel")
-                        .style(ButtonStyle::Subtle)
-                        .track_focus(&cancel_handle)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.custom_agent_form = None;
-                            this.pop_sub_page(window, cx);
-                        })),
-                ),
-        )
-        .child(
-            div()
-                .rounded_md()
-                .border_1()
-                .border_color(save_border)
-                .child(
-                    Button::new("custom-agent-form-save", "Save")
-                        .style(ButtonStyle::Filled)
-                        .track_focus(&save_handle)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            save_custom_agent_form(this, window, cx);
-                        })),
-                ),
-        )
-}
-
 /// Returns the border color for a button's focus ring: visible when focused
 /// (keyboard or programmatic), transparent otherwise.
 fn focus_ring_color(handle: &FocusHandle, window: &Window, cx: &App) -> gpui::Hsla {
@@ -718,7 +823,7 @@ fn focus_ring_color(handle: &FocusHandle, window: &Window, cx: &App) -> gpui::Hs
 
 fn save_custom_agent_form(
     settings_window: &mut SettingsWindow,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut Context<SettingsWindow>,
 ) {
     let built = {
@@ -770,16 +875,18 @@ fn save_custom_agent_form(
     });
 
     settings_window.custom_agent_form = None;
-    settings_window.pop_sub_page(window, cx);
+    cx.notify();
 }
 
 /// Plain (editor-free) snapshot of the form's contents, so the validation /
 /// build logic can be exercised without a GPUI context.
 struct CustomAgentFormValues {
     original_id: Option<AgentId>,
+    registry: bool,
     name: String,
     command: String,
     args: String,
+    working_directory: String,
     env: Vec<(String, String)>,
     default_mode: Option<String>,
     default_config_options: HashMap<String, AgentConfigOptionValue>,
@@ -792,9 +899,11 @@ fn build_settings_from_form(
 ) -> Result<(AgentId, Option<AgentId>, CustomAgentServerSettings), SharedString> {
     let values = CustomAgentFormValues {
         original_id: form.original_id.clone(),
+        registry: form.registry,
         name: form.name.read(cx).text(cx),
         command: form.command.read(cx).text(cx),
         args: form.args.read(cx).text(cx),
+        working_directory: form.working_directory.read(cx).text(cx),
         env: read_kv(&form.env, cx),
         default_mode: form.default_mode.clone(),
         default_config_options: form.default_config_options.clone(),
@@ -817,20 +926,36 @@ fn build_settings_from_values(
         return Err("Agent name is required.".into());
     }
 
+    if values.registry {
+        let id = values
+            .original_id
+            .clone()
+            .ok_or_else(|| SharedString::from("Registry agent identifier is missing."))?;
+        return Ok((
+            id,
+            values.original_id,
+            CustomAgentServerSettings::Registry {
+                env: collect_kv(&values.env, "environment variable")?,
+                default_mode: values.default_mode,
+                default_config_options: values.default_config_options,
+                favorite_config_option_values: values.favorite_config_option_values,
+            },
+        ));
+    }
+
     let command = values.command.trim().to_string();
     if command.is_empty() {
         return Err("Command is required.".into());
     }
 
-    let args = values
-        .args
-        .split_whitespace()
-        .map(|arg| arg.to_string())
-        .collect::<Vec<_>>();
+    let args = shlex::split(&values.args)
+        .ok_or_else(|| SharedString::from("Arguments contain an unmatched quote or escape."))?;
     let env = collect_kv(&values.env, "environment variable")?;
 
     let content = CustomAgentServerSettings::Custom {
         path: command.into(),
+        working_directory: (!values.working_directory.trim().is_empty())
+            .then(|| values.working_directory.trim().into()),
         args,
         env,
         default_mode: values.default_mode,
@@ -943,6 +1068,7 @@ async fn add_custom_agent_settings_entry(
                             server_name,
                             CustomAgentServerSettings::Custom {
                                 path: "path_to_executable".into(),
+                                working_directory: None,
                                 args: vec![],
                                 env: HashMap::default(),
                                 default_mode: None,
@@ -1038,9 +1164,11 @@ mod tests {
     fn values() -> CustomAgentFormValues {
         CustomAgentFormValues {
             original_id: None,
+            registry: false,
             name: "my-agent".into(),
             command: "/usr/bin/agent".into(),
             args: String::new(),
+            working_directory: String::new(),
             env: Vec::new(),
             default_mode: None,
             default_config_options: HashMap::default(),
@@ -1107,6 +1235,7 @@ mod tests {
             content,
             CustomAgentServerSettings::Custom {
                 path: "/usr/bin/agent".into(),
+                working_directory: None,
                 args: vec!["--flag".into(), "value".into()],
                 env: expected_env,
                 default_mode: None,

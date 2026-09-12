@@ -249,6 +249,7 @@ pub struct EditorElement {
     editor: Entity<Editor>,
     style: EditorStyle,
     split_side: Option<SplitSide>,
+    review_gutter: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,7 +266,13 @@ impl EditorElement {
             editor: editor.clone(),
             style,
             split_side: None,
+            review_gutter: false,
         }
+    }
+
+    pub(crate) fn review_gutter(mut self, enabled: bool) -> Self {
+        self.review_gutter = enabled;
+        self
     }
 
     pub fn set_split_side(&mut self, side: SplitSide) {
@@ -2838,6 +2845,10 @@ impl EditorElement {
             return Arc::default();
         }
 
+        if self.review_gutter {
+            return self.layout_review_line_numbers(gutter, window);
+        }
+
         let relative = self.editor.read(cx).relative_line_numbers(cx);
 
         let relative_line_numbers_enabled = relative.enabled();
@@ -2916,6 +2927,7 @@ impl EditorElement {
                 let segment = LineNumberSegment {
                     shaped_line,
                     hitbox,
+                    is_marker: false,
                 };
 
                 let buffer_row = DisplayPoint::new(display_row, 0)
@@ -2935,6 +2947,115 @@ impl EditorElement {
                 })
                 .segments
                 .push(segment);
+        }
+        Arc::new(line_numbers)
+    }
+
+    fn layout_review_line_numbers(
+        &self,
+        gutter: &Gutter<'_>,
+        window: &mut Window,
+    ) -> Arc<HashMap<MultiBufferRow, LineNumberLayout>> {
+        let mut line_numbers: HashMap<MultiBufferRow, LineNumberLayout> = HashMap::default();
+        let snapshot = gutter.snapshot.buffer_snapshot();
+        for (index, row_info) in gutter.row_infos.iter().enumerate() {
+            let Some(buffer_row) = row_info.buffer_row else {
+                continue;
+            };
+            let display_row = DisplayRow(gutter.range.start.0 + index as u32);
+            let multi_buffer_row = MultiBufferRow(
+                DisplayPoint::new(display_row, 0)
+                    .to_point(gutter.snapshot)
+                    .row,
+            );
+            let deleted = row_info
+                .diff_status
+                .is_some_and(|status| status.is_deleted());
+            let added = row_info
+                .diff_status
+                .is_some_and(|status| !status.is_deleted());
+            let mut cells = SmallVec::<[(String, Pixels, bool, Hsla); 3]>::new();
+            let number_color = gpui::rgb(if self.split_side.is_some() {
+                0x9AA4B8
+            } else {
+                0xA0AABD
+            })
+            .into();
+            if self.split_side.is_some() {
+                cells.push(((buffer_row + 1).to_string(), px(42.), false, number_color));
+                if deleted || added {
+                    let left = self.split_side == Some(SplitSide::Left);
+                    cells.push((
+                        if left { "−" } else { "+" }.to_owned(),
+                        px(56.),
+                        true,
+                        gpui::rgb(if left { 0xE3BBC1 } else { 0xBDE0C9 }).into(),
+                    ));
+                }
+            } else {
+                let old_row = if deleted {
+                    Some(buffer_row)
+                } else if added {
+                    None
+                } else {
+                    row_info.buffer_id.and_then(|buffer_id| {
+                        let buffer = snapshot.buffer_for_id(buffer_id)?;
+                        let diff = snapshot.diff_for_buffer_id(buffer_id)?;
+                        Some(
+                            diff.buffer_point_to_base_text_point(Point::new(buffer_row, 0), buffer)
+                                .row,
+                        )
+                    })
+                };
+                if let Some(old_row) = old_row {
+                    cells.push(((old_row + 1).to_string(), px(54.), false, number_color));
+                }
+                if !deleted {
+                    cells.push(((buffer_row + 1).to_string(), px(108.), false, number_color));
+                }
+                if deleted || added {
+                    cells.push((
+                        if deleted { "−" } else { "+" }.to_owned(),
+                        px(126.),
+                        true,
+                        gpui::rgb(if deleted { 0xE3BBC1 } else { 0xBDE0C9 }).into(),
+                    ));
+                }
+            }
+            for (text, column, is_marker, color) in cells {
+                let shaped_line = self.shape_line_number(text.into(), color, window);
+                let scroll_top =
+                    gutter.scroll_position.y * ScrollPixelOffset::from(gutter.line_height);
+                let line_origin = gutter.hitbox.origin
+                    + point(
+                        column - shaped_line.width * if is_marker { 0.5 } else { 1. },
+                        index as f32 * gutter.line_height
+                            - Pixels::from(
+                                scroll_top % ScrollPixelOffset::from(gutter.line_height),
+                            ),
+                    );
+                #[cfg(not(test))]
+                let hitbox = Some(window.insert_hitbox(
+                    Bounds::new(line_origin, size(shaped_line.width, gutter.line_height)),
+                    HitboxBehavior::Normal,
+                ));
+                #[cfg(test)]
+                let hitbox = {
+                    let _ = line_origin;
+                    None
+                };
+                line_numbers
+                    .entry(multi_buffer_row)
+                    .or_insert_with(|| LineNumberLayout {
+                        segments: Default::default(),
+                    })
+                    .segments
+                    .push(LineNumberSegment {
+                        shaped_line,
+                        hitbox,
+                        is_marker,
+                    });
+            }
         }
         Arc::new(line_numbers)
     }
@@ -5251,13 +5372,14 @@ impl EditorElement {
             for LineNumberSegment {
                 shaped_line,
                 hitbox,
+                is_marker,
             } in &line_layout.segments
             {
                 let Some(hitbox) = hitbox else {
                     continue;
                 };
 
-                let Some(()) = (if !is_singleton && hitbox.is_hovered(window) {
+                let Some(()) = (if !is_singleton && !is_marker && hitbox.is_hovered(window) {
                     let color = cx.theme().colors().editor_hover_line_number;
 
                     let line = self.shape_line_number(shaped_line.text.clone(), color, window);
@@ -5287,7 +5409,9 @@ impl EditorElement {
 
                 // In singleton buffers, we select corresponding lines on the line number click, so use | -like cursor.
                 // In multi buffers, we open file at the line number clicked, so use a pointing hand cursor.
-                if is_singleton {
+                if *is_marker {
+                    window.set_cursor_style(CursorStyle::Arrow, hitbox);
+                } else if is_singleton {
                     window.set_cursor_style(CursorStyle::IBeam, hitbox);
                 } else {
                     window.set_cursor_style(CursorStyle::PointingHand, hitbox);
@@ -5303,7 +5427,7 @@ impl EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if layout.display_hunks.is_empty() {
+        if self.review_gutter || layout.display_hunks.is_empty() {
             return;
         }
 
@@ -6700,7 +6824,7 @@ impl EditorElement {
         };
         window.text_system().shape_line(
             text,
-            self.style.text.font_size.to_pixels(window.rem_size()),
+            self.style.text.font_size.to_pixels(window.rem_size()) * (12. / 13.),
             &[run],
             None,
         )
@@ -6874,7 +6998,30 @@ pub fn render_breadcrumb_text(
 ) -> gpui::AnyElement {
     const MAX_SEGMENTS: usize = 12;
 
-    let element = h_flex().flex_grow_1().text_ui(cx);
+    let element = h_flex()
+        .flex_grow_1()
+        .min_w_0()
+        .text_ui(cx)
+        .when(!multibuffer_header, |this| {
+            this.text_size(px(12.)).line_height(px(16.))
+        });
+    let mut path_segment_count = 1;
+    if !multibuffer_header
+        && active_item.project_path(cx).is_some()
+        && let Some(path) = segments.first()
+    {
+        let path_segments: Vec<_> = path
+            .text
+            .split(['/', '\\'])
+            .filter(|component| !component.is_empty())
+            .map(|component| HighlightedText {
+                text: component.to_owned().into(),
+                highlights: Vec::new(),
+            })
+            .collect();
+        path_segment_count = path_segments.len();
+        segments.splice(..1, path_segments);
+    }
 
     let prefix_end_ix = cmp::min(segments.len(), MAX_SEGMENTS / 2);
     let suffix_start_ix = cmp::max(
@@ -6900,7 +7047,17 @@ pub fn render_breadcrumb_text(
             text_style.font_style = font.style;
             text_style.font_weight = font.weight;
         }
-        text_style.color = Color::Muted.color(cx);
+        text_style.color = if multibuffer_header {
+            Color::Muted.color(cx)
+        } else if index + 1 == path_segment_count {
+            gpui::rgb(0xD3D1DF).into()
+        } else {
+            gpui::rgb(0x9EA2B5).into()
+        };
+        if !multibuffer_header {
+            text_style.font_size = px(12.).into();
+            text_style.line_height = px(16.).into();
+        }
 
         if index == 0
             && !workspace::TabBarSettings::get_global(cx).show
@@ -6915,12 +7072,27 @@ pub fn render_breadcrumb_text(
             .into_any()
     });
 
-    let breadcrumbs = Itertools::intersperse_with(highlighted_segments, || {
-        Label::new("›").color(Color::Placeholder).into_any_element()
-    });
+    let breadcrumbs = highlighted_segments
+        .enumerate()
+        .flat_map(|(index, segment)| {
+            let separator = if index == 0 {
+                None
+            } else if !multibuffer_header && index == path_segment_count {
+                Some(div().flex_1().into_any_element())
+            } else {
+                Some(
+                    Label::new("›")
+                        .size(LabelSize::Custom(rems(12. / 16.)))
+                        .color(Color::Custom(gpui::rgb(0x9EA2B5).into()))
+                        .into_any_element(),
+                )
+            };
+            separator.into_iter().chain(Some(segment))
+        });
 
     let breadcrumbs_stack = h_flex()
         .gap_1()
+        .when(!multibuffer_header, |this| this.w_full().gap(px(10.)))
         .when(multibuffer_header, |this| {
             this.pl_2()
                 .border_l_1()
@@ -6940,12 +7112,96 @@ pub fn render_breadcrumb_text(
 
     let has_project_path = active_item.project_path(cx).is_some();
 
+    let task_controls = if !multibuffer_header && has_project_path {
+        let mut actions: Vec<(&str, SharedString, u32, Box<dyn gpui::Action>)> = vec![(
+            "Run",
+            "icons/paper_run.svg".into(),
+            0xAAC8AD,
+            zed_actions::Spawn::modal().boxed_clone(),
+        )];
+        if let Some(action) = cx.build_action("debugger::Start", None).log_err() {
+            actions.push(("Debug", IconName::Debug.path().into(), 0xC9B9DD, action));
+        }
+        actions.extend(
+            [
+                (
+                    "Build",
+                    SharedString::from(IconName::ToolHammer.path()),
+                    0xC7BEA8,
+                    "build",
+                ),
+                (
+                    "Test",
+                    SharedString::from("icons/paper_test.svg"),
+                    0xB7B8C7,
+                    "test",
+                ),
+            ]
+            .map(|(label, icon, color, tag)| {
+                (
+                    label,
+                    icon,
+                    color,
+                    zed_actions::Spawn::ByTag {
+                        task_tag: tag.to_string(),
+                        reveal_target: None,
+                    }
+                    .boxed_clone(),
+                )
+            }),
+        );
+        Some(
+            h_flex()
+                .flex_none()
+                .gap(px(4.))
+                .children(actions.into_iter().map(|(label, icon, color, action)| {
+                    ButtonLike::new(label)
+                        .size(ui::ButtonSize::None)
+                        .height(px(25.).into())
+                        .corner_radius(px(5.))
+                        .style(ButtonStyle::Transparent)
+                        .when(label == "Run", |this| {
+                            this.background(gpui::rgb(0x2D3934).into())
+                        })
+                        .child(
+                            h_flex()
+                                .px(px(6.))
+                                .gap(px(6.))
+                                .child(
+                                    Icon::from_path(icon)
+                                        .size(IconSize::Small)
+                                        .color(Color::Custom(gpui::rgb(color).into())),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .line_height(px(14.))
+                                        .text_color(gpui::rgb(color))
+                                        .child(ui::localized(label, cx)),
+                                ),
+                        )
+                        .on_click(move |_, window, cx| {
+                            window.dispatch_action(action.boxed_clone(), cx)
+                        })
+                }))
+                .into_any_element(),
+        )
+    } else {
+        None
+    };
+
     match editor {
         Some(editor) => element
             .id("breadcrumb_container")
             .when(!multibuffer_header, |this| this.overflow_x_scroll())
             .child(
                 ButtonLike::new("toggle outline view")
+                    .when(!multibuffer_header, |this| {
+                        this.full_width()
+                            .height(px(30.).into())
+                            .size(ui::ButtonSize::None)
+                            .style(ButtonStyle::Transparent)
+                    })
                     .child(breadcrumbs)
                     .when(multibuffer_header, |this| {
                         this.style(ButtonStyle::Transparent)
@@ -7011,6 +7267,17 @@ pub fn render_breadcrumb_text(
                         })
                     }),
             )
+            .when_some(task_controls, |this, controls| {
+                this.child(
+                    div()
+                        .w(px(1.))
+                        .h(px(14.))
+                        .mx(px(10.))
+                        .flex_none()
+                        .bg(gpui::rgb(0x414453)),
+                )
+                .child(controls)
+            })
             .into_any_element(),
         None => element
             .h(rems_from_px(22_f32)) // Match the height and padding of the `ButtonLike` in the other arm.
@@ -9831,6 +10098,7 @@ impl EditorLayout {
 struct LineNumberSegment {
     shaped_line: ShapedLine,
     hitbox: Option<Hitbox>,
+    is_marker: bool,
 }
 
 #[derive(Debug)]

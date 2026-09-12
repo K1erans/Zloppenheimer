@@ -2,7 +2,7 @@ use gpui::{Action as _, App};
 use itertools::Itertools as _;
 use settings::{
     AudioInputDeviceName, AudioOutputDeviceName, EditPredictionDataCollectionChoice,
-    LanguageSettingsContent, SemanticTokens, SettingsContent,
+    LanguageSettingsContent, SemanticTokens, Settings as _, SettingsContent,
 };
 use std::sync::{Arc, OnceLock};
 use strum::{EnumMessage, IntoDiscriminant as _, VariantArray};
@@ -64,6 +64,10 @@ macro_rules! concat_sections {
 
 pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
     vec![
+        SettingsPage {
+            title: "Profile",
+            items: Box::new([]),
+        },
         general_page(cx),
         appearance_page(),
         keymap_page(),
@@ -136,9 +140,205 @@ fn developer_page(cx: &App) -> SettingsPage {
 }
 
 fn general_page(cx: &App) -> SettingsPage {
+    fn permissions_section() -> Vec<SettingsPageItem> {
+        let field = || {
+            Box::new(SettingField {
+                organization_override: None,
+                json_path: Some("agent.tool_permissions.default"),
+                pick: |settings_content: &settings::SettingsContent| {
+                    settings_content
+                        .agent
+                        .as_ref()?
+                        .tool_permissions
+                        .as_ref()?
+                        .default
+                        .as_ref()
+                },
+                write: |settings_content: &mut settings::SettingsContent, value, _: &App| {
+                    let agent = settings_content.agent.get_or_insert_default();
+                    if let Some(mode) = value {
+                        agent.set_full_access(mode == settings::ToolPermissionMode::Allow);
+                    } else {
+                        agent.tool_permissions.get_or_insert_default().default = None;
+                        let sandbox = agent.sandbox_permissions.get_or_insert_default();
+                        sandbox.allow_unsandboxed = None;
+                        sandbox.allow_all_hosts = None;
+                        sandbox.allow_fs_write_all = None;
+                    }
+                },
+            })
+        };
+        vec![
+            SettingsPageItem::SectionHeader("Permissions"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Default permissions",
+                description: "Agents can read and edit workspace files, and ask for additional access when needed.",
+                field: field(),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Full access",
+                description: "Allow agents to edit files outside the workspace and run network commands without approval. This increases the risk of data loss or unexpected changes.",
+                field: field(),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     fn general_settings_section(_cx: &App) -> Vec<SettingsPageItem> {
         vec![
-            SettingsPageItem::SectionHeader("General Settings"),
+            SettingsPageItem::SectionHeader("General"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Projectless task folder",
+                description: "Default location for tasks started outside a project.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("projectless_task_folder"),
+                    pick: |settings_content| {
+                        settings_content.workspace.projectless_task_folder.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.projectless_task_folder = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Default file open destination",
+                description: "Choose where file links from conversations open.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("default_file_open_destination"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workspace
+                            .default_file_open_destination
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.default_file_open_destination = value
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Language",
+                description: "Choose the language used in the app.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("app_language"),
+                    pick: |settings_content| settings_content.workspace.app_language.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.app_language = value
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            #[cfg(target_os = "macos")]
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Show in menu bar",
+                description: "Keep Zloppenheimer in the menu bar when the window is closed.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("show_in_menu_bar"),
+                    pick: |settings_content| settings_content.workspace.show_in_menu_bar.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.show_in_menu_bar = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Bottom panel",
+                description: "Show the bottom panel control in the app header.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("show_bottom_panel_button"),
+                    pick: |settings_content| {
+                        settings_content.workspace.show_bottom_panel_button.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.show_bottom_panel_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Default terminal location",
+                description: "Where terminal shortcuts open new terminal tabs.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("terminal.dock"),
+                    pick: |settings_content| settings_content.terminal.as_ref()?.dock.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.terminal.get_or_insert_default().dock = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Prevent sleep while running",
+                description: "Keep your computer awake while an agent runs a task.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.prevent_idle_sleep"),
+                    pick: |settings_content| {
+                        settings_content.agent.as_ref()?.prevent_idle_sleep.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .prevent_idle_sleep = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Speed",
+                description: "Use faster responses when supported by the selected model.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.default_model.speed"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent
+                            .as_ref()?
+                            .default_model
+                            .as_ref()?
+                            .speed
+                            .as_ref()
+                    },
+                    write: |settings_content, value, cx| {
+                        let mut selection = settings_content
+                            .agent
+                            .as_ref()
+                            .and_then(|agent| agent.default_model.clone())
+                            .or_else(|| {
+                                agent_settings::AgentSettings::get_global(cx)
+                                    .default_model
+                                    .clone()
+                            });
+                        if let Some(selection) = selection.as_mut() {
+                            selection.speed = value;
+                            settings_content.agent.get_or_insert_default().default_model =
+                                Some(selection.clone());
+                        }
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SectionHeader("Workspace behavior"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Accessible Mode",
                 description: "Optimize Zed's interface for assistive technology such as screen readers. When enabled, otherwise-collapsed controls stay expanded and keyboard-reachable.",
@@ -521,6 +721,7 @@ fn general_page(cx: &App) -> SettingsPage {
         title: "General",
         items: concat_sections!(
             @vec,
+            permissions_section(),
             general_settings_section(cx),
             security_section(),
             workspace_restoration_section(),
@@ -8561,9 +8762,19 @@ fn collaboration_page() -> SettingsPage {
 }
 
 fn ai_page(cx: &App) -> SettingsPage {
-    fn general_section() -> [SettingsPageItem; 6] {
+    fn general_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("General"),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Model connections".into(),
+                r#type: Default::default(),
+                json_path: Some("model_connections"),
+                description: Some("Connect a provider to make its models available.".into()),
+                search_aliases: &["provider", "connection", "acp", "api key"],
+                in_json: false,
+                files: USER,
+                render: crate::pages::render_model_connections_page,
+            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Disable AI",
                 description: "Whether to disable all AI features in Zed.",

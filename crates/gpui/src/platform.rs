@@ -253,6 +253,10 @@ pub trait Platform: 'static {
     }
 
     fn set_dock_menu(&self, menu: Vec<MenuItem>, keymap: &Keymap);
+    /// Show an application button in the system menu bar, or remove it with `None`.
+    fn set_status_item(&self, _title: Option<&str>) -> Result<()> {
+        anyhow::bail!("System menu bar items are not supported on this platform")
+    }
     fn perform_dock_menu_action(&self, _action: usize) {}
     fn add_recent_document(&self, _path: &Path) {}
     fn update_jump_list(

@@ -122,8 +122,10 @@ impl Platform for VisualTestPlatform {
     fn open_window(
         &self,
         handle: AnyWindowHandle,
-        options: WindowParams,
+        mut options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
+        // AppKit fits visible windows to the display's work area, changing snapshot dimensions.
+        options.show = false;
         self.platform.open_window(handle, options)
     }
 
@@ -185,6 +187,10 @@ impl Platform for VisualTestPlatform {
     }
 
     fn set_dock_menu(&self, _menu: Vec<MenuItem>, _keymap: &Keymap) {}
+
+    fn set_status_item(&self, _title: Option<&str>) -> Result<()> {
+        Ok(())
+    }
 
     fn on_app_menu_action(&self, _callback: Box<dyn FnMut(&dyn crate::Action)>) {}
 

@@ -124,7 +124,7 @@ impl ModelSelectorListItem {
 }
 
 impl RenderOnce for ModelSelectorListItem {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let is_disabled = self.disabled.is_some();
 
         let model_icon_color = if self.is_selected {
@@ -138,9 +138,13 @@ impl RenderOnce for ModelSelectorListItem {
         let is_favorite = self.is_favorite;
 
         ListItem::new(self.index)
-            .inset(true)
+            .inset(false)
+            .height(px(36.))
+            .horizontal_padding(px(12.))
+            .corner_radius(px(6.))
+            .selected_background(gpui::rgb(0x3A3548).into())
             .spacing(ListItemSpacing::Sparse)
-            .toggle_state(self.is_focused)
+            .toggle_state(self.is_focused || self.is_selected)
             .when_some(self.disabled, |this, disabled_reason| {
                 this.disabled(true)
                     .tooltip(Tooltip::text(disabled_reason.0))
@@ -148,7 +152,7 @@ impl RenderOnce for ModelSelectorListItem {
             .child(
                 h_flex()
                     .w_full()
-                    .gap_1p5()
+                    .gap(px(10.))
                     .when_some(self.icon, |this, icon| {
                         this.child(
                             match icon {
@@ -160,9 +164,14 @@ impl RenderOnce for ModelSelectorListItem {
                         )
                     })
                     .child(
-                        Label::new(self.title)
-                            .when(is_disabled, |this| this.color(Color::Disabled))
-                            .truncate(),
+                        div()
+                            .text_size(px(13.))
+                            .line_height(px(18.))
+                            .when(is_disabled, |this| {
+                                this.text_color(Color::Disabled.color(cx))
+                            })
+                            .truncate()
+                            .child(self.title),
                     )
                     .when(self.is_latest, |parent| parent.child(Chip::new("Latest")))
                     .when_some(self.cost_info, |this, cost_info| {
@@ -179,10 +188,13 @@ impl RenderOnce for ModelSelectorListItem {
             )
             .end_slot(
                 h_flex()
-                    .pr_2()
                     .gap_1p5()
                     .when(self.is_selected, |this| {
-                        this.child(Icon::new(IconName::Check).color(Color::Accent))
+                        this.child(
+                            Icon::new(IconName::Check)
+                                .size(IconSize::Custom(rems_from_px(16_f32)))
+                                .color(Color::Accent),
+                        )
                     })
                     .when(is_disabled, |this| {
                         this.child(Icon::new(IconName::Info).color(Color::Muted))
@@ -232,18 +244,43 @@ impl RenderOnce for ModelSelectorFooter {
         let action = self.action;
         let focus_handle = self.focus_handle;
 
-        h_flex()
+        v_flex()
             .w_full()
-            .p_1p5()
             .border_t_1()
-            .border_color(cx.theme().colors().border_variant)
+            .border_color(gpui::rgb(0x424452))
             .child(
-                Button::new("configure", "Configure")
-                    .full_width()
-                    .style(ButtonStyle::Outlined)
-                    .key_binding(
-                        KeyBinding::for_action_in(action.as_ref(), &focus_handle, cx)
-                            .map(|kb| kb.size(rems_from_px(12_f32))),
+                v_flex()
+                    .id("manage-models")
+                    .w_full()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .gap(px(4.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(gpui::rgb(0x3A3548)))
+                    .tooltip({
+                        let action = action.boxed_clone();
+                        move |_, cx| {
+                            Tooltip::for_action_in(
+                                "Manage models",
+                                action.as_ref(),
+                                &focus_handle,
+                                cx,
+                            )
+                        }
+                    })
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .line_height(px(18.))
+                            .child("Manage models…"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .line_height(px(16.))
+                            .text_color(Color::Muted.color(cx))
+                            .child("Choose visible models and your default"),
                     )
                     .on_click(move |_, window, cx| {
                         window.dispatch_action(action.boxed_clone(), cx);

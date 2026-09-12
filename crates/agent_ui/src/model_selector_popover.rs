@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use acp_thread::{AgentModelIcon, AgentModelInfo, AgentModelSelector};
+use acp_thread::{AgentModelInfo, AgentModelSelector};
 use gpui::{Entity, FocusHandle};
 use picker::popover_menu::PickerPopoverMenu;
 use ui::{PopoverMenuHandle, Tooltip, prelude::*};
@@ -52,12 +52,13 @@ impl Render for ModelSelectorPopover {
             .map(|model| model.name.clone())
             .unwrap_or_else(|| SharedString::from("Select a Model"));
 
-        let model_icon = model.as_ref().and_then(|model| model.icon.clone());
-
         let (color, icon) = if self.menu_handle.is_deployed() {
             (Color::Accent, IconName::ChevronUp)
         } else {
-            (Color::Muted, IconName::ChevronDown)
+            (
+                Color::Custom(gpui::rgb(0xC4C3D1).into()),
+                IconName::ChevronDown,
+            )
         };
 
         let show_cycle_row = selector.delegate.favorites_count() > 1;
@@ -73,21 +74,11 @@ impl Render for ModelSelectorPopover {
         PickerPopoverMenu::new(
             self.selector.clone(),
             Button::new("active-model", model_name)
-                .label_size(LabelSize::Small)
+                .label_size(LabelSize::XSmall)
                 .color(color)
-                .when_some(model_icon, |this, icon| {
-                    this.start_icon(
-                        match icon {
-                            AgentModelIcon::Path(path) => Icon::from_external_svg(path),
-                            AgentModelIcon::Named(icon_name) => Icon::new(icon_name),
-                        }
-                        .color(color)
-                        .size(IconSize::XSmall),
-                    )
-                })
                 .end_icon(Icon::new(icon).color(Color::Muted).size(IconSize::XSmall)),
             tooltip,
-            gpui::Anchor::BottomRight,
+            gpui::Anchor::BottomLeft,
             cx,
         )
         .with_handle(self.menu_handle.clone())

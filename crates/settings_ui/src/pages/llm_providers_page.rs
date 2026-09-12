@@ -138,7 +138,7 @@ pub(crate) fn render_add_llm_provider_popover(
         })
 }
 
-fn render_provider_section(
+pub(super) fn render_provider_section(
     settings_window: &SettingsWindow,
     provider: &Arc<dyn LanguageModelProvider>,
     is_first: bool,

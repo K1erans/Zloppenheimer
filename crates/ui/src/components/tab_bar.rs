@@ -11,6 +11,8 @@ pub struct TabBar {
     children: SmallVec<[AnyElement; 2]>,
     end_children: SmallVec<[AnyElement; 2]>,
     scroll_handle: Option<ScrollHandle>,
+    document_style: bool,
+    terminal_style: bool,
 }
 
 impl TabBar {
@@ -21,11 +23,23 @@ impl TabBar {
             children: SmallVec::new(),
             end_children: SmallVec::new(),
             scroll_handle: None,
+            document_style: false,
+            terminal_style: false,
         }
     }
 
     pub fn track_scroll(mut self, scroll_handle: &ScrollHandle) -> Self {
         self.scroll_handle = Some(scroll_handle.clone());
+        self
+    }
+
+    pub fn terminal_style(mut self, enabled: bool) -> Self {
+        self.terminal_style = enabled;
+        self
+    }
+
+    pub fn document_style(mut self, enabled: bool) -> Self {
+        self.document_style = enabled;
         self
     }
 
@@ -98,7 +112,11 @@ impl RenderOnce for TabBar {
             .flex_none()
             .w_full()
             .h(Tab::container_height(cx))
+            .when(self.document_style, |this| this.h(px(48.)))
             .bg(cx.theme().colors().tab_bar_background)
+            .when(self.terminal_style, |this| {
+                this.h(px(36.)).bg(gpui::rgb(0x232530))
+            })
             .when(!self.start_children.is_empty(), |this| {
                 this.child(
                     h_flex()
@@ -134,6 +152,9 @@ impl RenderOnce for TabBar {
                             .when_some(self.scroll_handle, |cx, scroll_handle| {
                                 cx.track_scroll(&scroll_handle)
                             })
+                            .when(self.terminal_style, |this| {
+                                this.h(px(35.)).pl(px(14.)).gap(px(6.))
+                            })
                             .children(self.children),
                     ),
             )
@@ -146,6 +167,9 @@ impl RenderOnce for TabBar {
                         .border_color(cx.theme().colors().border)
                         .border_b_1()
                         .border_l_1()
+                        .when(self.document_style || self.terminal_style, |this| {
+                            this.border_l_0().pl_0().pr(px(12.))
+                        })
                         .children(self.end_children),
                 )
             })

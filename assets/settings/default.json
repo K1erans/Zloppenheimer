@@ -9,7 +9,7 @@
   "theme": {
     "mode": "system",
     "light": "One Light",
-    "dark": "One Dark",
+    "dark": "Zloppenheimer",
   },
   "icon_theme": "Zed (Default)",
   // The name of a base set of key bindings to use.
@@ -38,7 +38,7 @@
     // "calt": false
   },
   // The default font size for text in the editor
-  "buffer_font_size": 15,
+  "buffer_font_size": 13,
   // The weight of the editor font in standard CSS units from 100 to 900.
   "buffer_font_weight": 400,
   // Set the buffer's line height.
@@ -51,7 +51,7 @@
   //         "buffer_line_height": {
   //           "custom": 2
   //         },
-  "buffer_line_height": "comfortable",
+  "buffer_line_height": { "custom": 1.6153846 },
   // The name of a font to use for rendering text in the UI
   // You can set this to ".SystemUIFont" to use the system font
   // ".ZedSans" currently aliases to "IBM Plex Sans", but this may
@@ -218,6 +218,11 @@
   //         "on_new_window": "empty_tab"
   //  2. Show the launchpad with recent projects
   //         "on_new_window": "launchpad"
+  "app_language": "auto",
+  "default_file_open_destination": "internal",
+  "projectless_task_folder": "~/Documents/Zloppenheimer",
+  "show_bottom_panel_button": true,
+  "show_in_menu_bar": true,
   "on_new_window": "launchpad",
   // What to do when the last window is closed.
   // May take 2 values:
@@ -601,19 +606,19 @@
     // Whether to show git status indicators on the branch icon in the titlebar.
     "show_branch_status_icon": false,
     // Whether to show the branch name button in the titlebar.
-    "show_branch_name": true,
+    "show_branch_name": false,
     // Whether to show the worktree name button in the titlebar.
-    "show_worktree_name": true,
+    "show_worktree_name": false,
     // Whether to show the project host and name in the titlebar.
-    "show_project_items": true,
+    "show_project_items": false,
     // Whether to show onboarding banners in the titlebar.
-    "show_onboarding_banner": true,
+    "show_onboarding_banner": false,
     // Whether to show user picture in the titlebar.
     "show_user_picture": true,
     // Whether to show the user menu in the titlebar.
-    "show_user_menu": true,
+    "show_user_menu": false,
     // Whether to show the sign in button in the titlebar.
-    "show_sign_in": true,
+    "show_sign_in": false,
     // Whether to show the menus in the titlebar.
     "show_menus": false,
     // The layout of window control buttons in the title bar (Linux only).
@@ -867,7 +872,7 @@
     // Where to dock the project panel. Can be 'left' or 'right'.
     "dock": "right",
     // Spacing between worktree entries in the project panel. Can be 'comfortable' or 'standard'.
-    "entry_spacing": "comfortable",
+    "entry_spacing": "standard",
     // Whether to show file icons in the project panel.
     "file_icons": true,
     // What to show for directories in the project panel.
@@ -878,11 +883,11 @@
     //   "chevron"
     // 3. A disclosure chevron followed by a folder icon:
     //   "both"
-    "folder_indicator": "icon",
+    "folder_indicator": "both",
     // Whether to show the git status in the project panel.
     "git_status": true,
     // Amount of indentation for nested items.
-    "indent_size": 20,
+    "indent_size": 12,
     // Whether to reveal it in the project panel automatically,
     // when a corresponding project entry becomes active.
     // Gitignored entries are never auto revealed.
@@ -1063,7 +1068,7 @@
     // Where to dock the git panel. Can be 'left' or 'right'.
     "dock": "right",
     // Default width of the git panel.
-    "default_width": 360,
+    "default_width": 244,
     // Style of the git status indicator in the panel.
     //
     // Choices: label_color, icon
@@ -1095,7 +1100,7 @@
     // How to group entries in the git panel.
     //
     // Default: status
-    "group_by": "status",
+    "group_by": "staging",
     // Whether to collapse untracked files in the diff panel.
     //
     // Default: false
@@ -1162,7 +1167,7 @@
     "limit_content_width": true,
     // Maximum content width in pixels when limit_content_width is enabled.
     // Content will be centered within the panel.
-    "max_content_width": 850,
+    "max_content_width": 820,
     // The default model to use when creating new threads.
     "default_model": {
       // The provider to use.
@@ -1365,7 +1370,7 @@
     // Minimum number of lines to display in the agent message editor.
     //
     // Default: 4
-    "message_editor_min_lines": 4,
+    "message_editor_min_lines": 1,
     // Whether to show turn statistics (elapsed time during generation, final turn duration).
     //
     // Default: false
@@ -1431,7 +1436,7 @@
     // Whether or not to show the tab bar in the editor
     "show": true,
     // Whether or not to show the navigation history buttons.
-    "show_nav_history_buttons": true,
+    "show_nav_history_buttons": false,
     // Whether or not to show the tab bar buttons.
     "show_tab_bar_buttons": true,
     // Whether or not to show pinned tabs in a separate row.
@@ -1447,16 +1452,18 @@
     // One of: ["right", "left"]
     "close_position": "right",
     // Whether to show the file icon for a tab.
-    "file_icons": false,
+    "file_icons": true,
     // Controls the appearance behavior of the tab's close button.
     //
-    // 1. Show it just upon hovering the tab. (default)
+    // 1. Show it just upon hovering the tab.
     //     "hover"
     // 2. Show it persistently.
     //     "always"
     // 3. Never show it, even if hovering it.
     //     "hidden"
-    "show_close_button": "hover",
+    // 4. Show it on the active tab. (default)
+    //     "active"
+    "show_close_button": "active",
     // What to do after closing the current tab.
     //
     // 1. Activate the tab that was open previously (default)
@@ -1947,7 +1954,7 @@
   // Status bar-related settings.
   "status_bar": {
     // Whether to show the status bar.
-    "experimental.show": true,
+    "experimental.show": false,
     // Whether to show the name of the active file in the status bar.
     "show_active_file": false,
     // Whether to show the active language button in the status bar.
@@ -1982,6 +1989,7 @@
     "shell": "system",
     // Where to dock terminals panel. Can be `left`, `right`, `bottom`.
     "dock": "bottom",
+    "font_size": 12,
     // Whether the terminal panel should open on startup.
     //
     // Default: false
@@ -1993,7 +2001,7 @@
     // Default width when the terminal is docked to the left or right.
     "default_width": 640,
     // Default height when the terminal is docked to the bottom.
-    "default_height": 320,
+    "default_height": 280,
     // What working directory to use when launching the terminal.
     // May take 5 values:
     // 1. Use the current file's directory, falling back to the project
@@ -2084,7 +2092,7 @@
     //         "line_height": {
     //           "custom": 2
     //         },
-    "line_height": "standard",
+    "line_height": { "custom": 1.6666667 },
     // Activate the python virtual environment, if one is found, in the
     // terminal's working directory (as resolved by the working_directory
     // setting). Set this to "off" to disable this behavior.

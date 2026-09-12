@@ -6,8 +6,8 @@ use anyhow::Result;
 use buffer_diff::DiffHunkStatus;
 use collections::{HashMap, HashSet};
 use editor::{
-    DiffHunkRenderer, Direction, Editor, EditorEvent, EditorSettings, MultiBuffer,
-    MultiBufferSnapshot, SelectionEffects, SplittableEditor, ToPoint,
+    DiffHunkRenderer, DiffStyleControls, Direction, Editor, EditorEvent, EditorSettings,
+    MultiBuffer, MultiBufferSnapshot, SelectionEffects, SplittableEditor, ToPoint,
     actions::{GoToHunk, GoToPreviousHunk},
     multibuffer_context_lines,
     scroll::Autoscroll,
@@ -28,7 +28,10 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use ui::{CommonAnimationExt, Divider, IconButtonShape, KeyBinding, Tooltip, prelude::*};
+use ui::{
+    ButtonLike, CommonAnimationExt, ContextMenu, Divider, IconButtonShape, KeyBinding, PopoverMenu,
+    Tooltip, prelude::*,
+};
 use util::{ResultExt, truncate_and_trailoff};
 use workspace::{
     Item, ItemHandle, ItemNavHistory, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
@@ -87,12 +90,12 @@ impl AgentDiffPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        let multibuffer = cx.new(|_| MultiBuffer::new(Capability::ReadWrite));
+        let multibuffer = cx.new(|_| MultiBuffer::without_headers(Capability::ReadWrite));
 
         let project = thread.read(cx).project().clone();
         let editor = cx.new(|cx| {
             let workspace_entity = workspace.upgrade().expect("workspace must exist");
-            let diff_display_editor = SplittableEditor::new(
+            let mut diff_display_editor = SplittableEditor::new(
                 EditorSettings::get_global(cx).diff_view_style,
                 multibuffer.clone(),
                 project.clone(),
@@ -100,6 +103,7 @@ impl AgentDiffPane {
                 window,
                 cx,
             );
+            diff_display_editor.set_review_style(true);
             diff_display_editor
                 .set_diff_hunk_renderer(Some(agent_diff_renderer(&thread, workspace.clone())), cx);
             diff_display_editor.update_editors(cx, |editor, _cx| {
@@ -112,6 +116,7 @@ impl AgentDiffPane {
 
         let mut this = Self {
             _subscriptions: vec![
+                cx.observe(&editor, |_, _, cx| cx.notify()),
                 cx.observe_in(&action_log, window, |this, _action_log, window, cx| {
                     this.update_excerpts(window, cx)
                 }),
@@ -239,6 +244,303 @@ impl AgentDiffPane {
         if let AcpThreadEvent::TitleUpdated = event {
             cx.emit(EditorEvent::TitleChanged);
         }
+    }
+
+    fn render_review(&self, cx: &mut Context<Self>) -> AnyElement {
+        let active_path = self.active_project_path(cx);
+        let mut files = self
+            .thread
+            .read(cx)
+            .action_log()
+            .read(cx)
+            .changed_buffers(cx)
+            .filter_map(|(buffer, diff)| {
+                let path = buffer.read(cx).project_path(cx)?;
+                Some((path, buffer, diff))
+            })
+            .collect::<Vec<_>>();
+        files.sort_by(|left, right| left.0.path.cmp(&right.0.path));
+        let active_index = files
+            .iter()
+            .position(|(path, _, _)| Some(path) == active_path.as_ref())
+            .unwrap_or(0);
+        let active_file = files.get(active_index);
+        let path_label = active_file
+            .map(|(path, _, _)| {
+                self.thread
+                    .read(cx)
+                    .project()
+                    .read(cx)
+                    .short_full_path_for_project_path(path, cx)
+                    .unwrap_or_else(|| path.path.to_string())
+            })
+            .unwrap_or_else(|| "Changes".to_owned());
+        let stats = active_file
+            .map(|(_, _, diff)| action_log::DiffStats::single_file(diff.read(cx)))
+            .unwrap_or_default();
+        let hunk_count = active_file
+            .map(|(_, buffer, diff)| {
+                let buffer = buffer.read(cx).snapshot();
+                diff.read(cx)
+                    .snapshot(cx)
+                    .hunks_intersecting_range(
+                        language::Anchor::min_max_range_for_buffer(buffer.remote_id()),
+                        &buffer,
+                    )
+                    .count()
+            })
+            .unwrap_or(0);
+        let file_count = files.len();
+        let previous_file = active_index
+            .checked_sub(1)
+            .and_then(|index| files.get(index))
+            .map(|(_, buffer, _)| PathKey::for_buffer(buffer, cx));
+        let next_file = files
+            .get(active_index + 1)
+            .map(|(_, buffer, _)| PathKey::for_buffer(buffer, cx));
+        let weak = cx.weak_entity();
+        let file_choices = files
+            .iter()
+            .map(|(path, buffer, _)| (path.path.to_string(), PathKey::for_buffer(buffer, cx)))
+            .collect::<Vec<_>>();
+        let split = self.editor.read(cx).is_split();
+        let review_focus = self.focus_handle(cx);
+        v_flex()
+            .size_full()
+            .child(
+                h_flex()
+                    .h(px(40.))
+                    .flex_none()
+                    .px(px(16.))
+                    .gap(px(10.))
+                    .border_b_1()
+                    .border_color(gpui::rgb(0x414451))
+                    .child(
+                        ButtonLike::new("return-to-thread")
+                            .size(ButtonSize::None)
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(gpui::rgb(0xDDCBEA))
+                                    .child("← Thread"),
+                            )
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(ToggleFocus.boxed_clone(), cx)
+                            }),
+                    )
+                    .child(div().w(px(1.)).h(px(18.)).bg(gpui::rgb(0x464957)))
+                    .child(Icon::new(IconName::File).size(IconSize::Small))
+                    .child(
+                        PopoverMenu::new("review-file-picker")
+                            .anchor(gpui::Anchor::TopLeft)
+                            .trigger(
+                                ButtonLike::new("review-active-file")
+                                    .size(ButtonSize::None)
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .line_height(px(16.))
+                                            .text_color(gpui::rgb(0xD9DCE8))
+                                            .child(path_label),
+                                    )
+                                    .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                            )
+                            .menu(move |window, cx| {
+                                Some(ContextMenu::build(window, cx, |menu, _, _| {
+                                    let mut menu = menu.context(review_focus.clone());
+                                    for (label, path) in &file_choices {
+                                        let weak = weak.clone();
+                                        let path = path.clone();
+                                        menu =
+                                            menu.entry(label.clone(), None, move |window, cx| {
+                                                weak.update(cx, |this, cx| {
+                                                    this.move_to_path(path.clone(), window, cx)
+                                                })
+                                                .log_err();
+                                            });
+                                    }
+                                    menu.separator()
+                                        .action("Keep all changes", KeepAll.boxed_clone())
+                                        .action("Reject all changes", RejectAll.boxed_clone())
+                                }))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(0xA6C8B0))
+                            .child(format!("+{}", stats.lines_added)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(0xD9A8B0))
+                            .child(format!("−{}", stats.lines_removed)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(0xAEB4C7))
+                            .child("Agent's changes"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(0xB7B8C7))
+                            .child(format!("{} / {file_count}", active_index + 1)),
+                    )
+                    .child(
+                        IconButton::new("previous-review-file", IconName::ChevronLeft)
+                            .height(px(26.).into())
+                            .corner_radius(px(5.))
+                            .icon_size(IconSize::XSmall)
+                            .disabled(previous_file.is_none())
+                            .tooltip(Tooltip::text("Previous file"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(path) = &previous_file {
+                                    this.move_to_path(path.clone(), window, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        IconButton::new("next-review-file", IconName::ChevronRight)
+                            .height(px(26.).into())
+                            .corner_radius(px(5.))
+                            .icon_size(IconSize::XSmall)
+                            .disabled(next_file.is_none())
+                            .tooltip(Tooltip::text("Next file"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(path) = &next_file {
+                                    this.move_to_path(path.clone(), window, cx);
+                                }
+                            })),
+                    )
+                    .child(DiffStyleControls::new(self.editor.clone()).labeled())
+                    .child(div().w(px(1.)).h(px(18.)).bg(gpui::rgb(0x464957)))
+                    .child(
+                        IconButton::new("review-terminal", IconName::Terminal)
+                            .height(px(28.).into())
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Terminal"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    terminal_view::terminal_panel::Toggle.boxed_clone(),
+                                    cx,
+                                )
+                            }),
+                    )
+                    .child(
+                        IconButton::new("review-split-pane", IconName::Split)
+                            .height(px(28.).into())
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Split pane"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    workspace::SplitRight::default().boxed_clone(),
+                                    cx,
+                                )
+                            }),
+                    ),
+            )
+            .when(split, |this| {
+                this.child(
+                    h_flex()
+                        .h(px(28.))
+                        .flex_none()
+                        .bg(gpui::rgb(0x292C38))
+                        .border_b_1()
+                        .border_color(gpui::rgb(0x414451))
+                        .children(
+                            [
+                                ("Original", "Before this response"),
+                                ("Agent changes", "After this response"),
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, (title, detail))| {
+                                h_flex()
+                                    .flex_1()
+                                    .h_full()
+                                    .px(px(14.))
+                                    .justify_between()
+                                    .when(index == 1, |this| {
+                                        this.border_l_1().border_color(gpui::rgb(0x414451))
+                                    })
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .line_height(px(16.))
+                                            .text_color(gpui::rgb(0xD9DCE8))
+                                            .child(title),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .line_height(px(16.))
+                                            .text_color(gpui::rgb(0xAEB4C7))
+                                            .child(detail),
+                                    )
+                            }),
+                        ),
+                )
+            })
+            .child(div().flex_1().min_h_0().child(self.editor.clone()))
+            .child(
+                h_flex()
+                    .h(px(32.))
+                    .flex_none()
+                    .px(px(24.))
+                    .gap(px(24.))
+                    .border_t_1()
+                    .border_color(gpui::rgb(0x414451))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(0xAEB4C7))
+                            .child(format!(
+                                "{hunk_count} {} in this file",
+                                if hunk_count == 1 { "change" } else { "changes" }
+                            )),
+                    )
+                    .children(
+                        [(false, "↑ Previous change"), (true, "↓ Next change")]
+                            .into_iter()
+                            .map(|(next, label)| {
+                                let editor = self.editor.clone();
+                                ButtonLike::new(label)
+                                    .size(ButtonSize::None)
+                                    .disabled(hunk_count == 0)
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .line_height(px(16.))
+                                            .text_color(gpui::rgb(if next {
+                                                0xD3C6E0
+                                            } else {
+                                                0xAEB4C7
+                                            }))
+                                            .child(label),
+                                    )
+                                    .on_click(move |_, window, cx| {
+                                        let focus = editor.read(cx).rhs_editor().focus_handle(cx);
+                                        if next {
+                                            focus.dispatch_action(&GoToHunk, window, cx);
+                                        } else {
+                                            focus.dispatch_action(&GoToPreviousHunk, window, cx);
+                                        }
+                                    })
+                            }),
+                    ),
+            )
+            .into_any_element()
     }
 
     pub fn move_to_path(&self, path_key: PathKey, window: &mut Window, cx: &mut App) {
@@ -503,6 +805,10 @@ impl Focusable for AgentDiffPane {
 }
 
 impl Item for AgentDiffPane {
+    fn show_tab_bar(&self) -> bool {
+        false
+    }
+
     type Event = EditorEvent;
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
@@ -730,7 +1036,7 @@ impl Render for AgentDiffPane {
                         ),
                 )
             })
-            .when(!is_empty, |el| el.child(self.editor.clone()))
+            .when(!is_empty, |el| el.child(self.render_review(cx)))
     }
 }
 
@@ -1013,7 +1319,7 @@ impl AgentDiffToolbar {
 
         match &self.active_item {
             None => ToolbarItemLocation::Hidden,
-            Some(AgentDiffToolbarItem::Pane(_)) => ToolbarItemLocation::PrimaryRight,
+            Some(AgentDiffToolbarItem::Pane(_)) => ToolbarItemLocation::Hidden,
             Some(AgentDiffToolbarItem::Editor { state, .. }) => match state {
                 EditorState::Reviewing => ToolbarItemLocation::PrimaryRight,
                 EditorState::Idle => ToolbarItemLocation::Hidden,

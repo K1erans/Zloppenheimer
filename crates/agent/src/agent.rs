@@ -1,3 +1,4 @@
+mod activity;
 mod db;
 mod legacy_thread;
 mod native_agent_server;
@@ -12,6 +13,7 @@ mod thread_store;
 mod tool_permissions;
 mod tools;
 
+pub use activity::*;
 use context_server::ContextServerId;
 pub use db::*;
 use itertools::Itertools;
@@ -609,6 +611,9 @@ impl NativeAgent {
                 // Flush thread content on quit so an in-flight async save
                 // can't leave a thread orphaned ("no thread found with ID").
                 cx.on_app_quit(Self::flush_threads_on_quit),
+                cx.observe_global::<settings::SettingsStore>(|this, cx| {
+                    this.models.refresh_list(cx);
+                }),
             ];
 
             if !cx.has_global::<SkillIndex>() {
@@ -868,7 +873,8 @@ impl NativeAgent {
         let (save_wake, save_wake_rx) = watch::channel(());
         let pending_save: Arc<Mutex<Option<PendingThreadSave>>> = Arc::new(Mutex::new(None));
         let database_future = ThreadsDatabase::connect(cx);
-        let thread_store = self.thread_store.clone();
+        // Detached saves can outlive a released session and must not retain the UI store during shutdown.
+        let thread_store = self.thread_store.downgrade();
         let save_worker = cx.spawn({
             let pending_save = pending_save.clone();
             let session_id = session_id.clone();
@@ -1838,7 +1844,7 @@ impl NativeAgent {
         mut wake: watch::Receiver<()>,
         pending_save: Arc<Mutex<Option<PendingThreadSave>>>,
         database_future: Shared<Task<Result<Arc<ThreadsDatabase>, Arc<anyhow::Error>>>>,
-        thread_store: Entity<ThreadStore>,
+        thread_store: WeakEntity<ThreadStore>,
         cx: &mut AsyncApp,
     ) -> Result<()> {
         loop {
@@ -1859,7 +1865,9 @@ impl NativeAgent {
                     .save_thread(id.clone(), db_thread, folder_paths)
                     .await
                     .log_err();
-                thread_store.update(cx, |store, cx| store.reload(cx));
+                if let Some(thread_store) = thread_store.upgrade() {
+                    thread_store.update(cx, |store, cx| store.reload(cx));
+                }
             }
             if closed {
                 break;
@@ -2552,7 +2560,28 @@ struct NativeAgentModelSelector {
 impl acp_thread::AgentModelSelector for NativeAgentModelSelector {
     fn list_models(&self, cx: &mut App) -> Task<Result<acp_thread::AgentModelList>> {
         log::debug!("NativeAgentConnection::list_models called");
-        let list = self.connection.0.read(cx).models.model_list.clone();
+        let connection = self.connection.0.read(cx);
+        let selected = connection
+            .sessions
+            .get(&self.session_id)
+            .and_then(|session| session.thread.read(cx).model())
+            .map(LanguageModels::model_id);
+        let hidden: HashSet<_> = agent_settings::AgentSettings::get_global(cx)
+            .hidden_models
+            .iter()
+            .map(|model| AgentModelId::new(format!("{}/{}", model.provider.0, model.model)))
+            .collect();
+        let mut list = connection.models.model_list.clone();
+        let visible = |model: &acp_thread::AgentModelInfo| {
+            selected.as_ref() == Some(&model.id) || !hidden.contains(&model.id)
+        };
+        match &mut list {
+            acp_thread::AgentModelList::Flat(models) => models.retain(visible),
+            acp_thread::AgentModelList::Grouped(groups) => groups.retain(|_, models| {
+                models.retain(visible);
+                !models.is_empty()
+            }),
+        }
         Task::ready(if list.is_empty() {
             Err(anyhow::anyhow!("No models available"))
         } else {

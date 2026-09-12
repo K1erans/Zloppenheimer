@@ -10,9 +10,40 @@ use crate::{
     ShowIndentGuides, ShowScrollbar, serialize_optional_f32_with_two_decimal_places,
 };
 
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AppLanguage {
+    #[default]
+    Auto,
+    English,
+    French,
+    German,
+    Spanish,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FileOpenDestination {
+    #[default]
+    Internal,
+    System,
+}
+
 #[with_fallible_options]
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct WorkspaceSettingsContent {
+    pub app_language: Option<AppLanguage>,
+    pub default_file_open_destination: Option<FileOpenDestination>,
+    /// Default directory for tasks started outside a project. Supports a leading `~`.
+    pub projectless_task_folder: Option<String>,
+    /// Show the bottom panel control in the app header.
+    pub show_bottom_panel_button: Option<bool>,
+    /// Keep the app available in the macOS menu bar after its windows close.
+    pub show_in_menu_bar: Option<bool>,
     /// Active pane styling settings.
     pub active_pane_modifiers: Option<ActivePaneModifiers>,
     /// The text rendering mode to use.
@@ -276,6 +307,7 @@ pub enum ClosePosition {
 #[serde(rename_all = "lowercase")]
 pub enum ShowCloseButton {
     Always,
+    Active,
     #[default]
     Hover,
     Hidden,

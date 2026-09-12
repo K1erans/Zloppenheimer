@@ -129,6 +129,13 @@ pub(crate) fn open_abs_path_at_point(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    if workspace::WorkspaceSettings::get_global(cx).default_file_open_destination
+        == settings::FileOpenDestination::System
+        && workspace.project().read(cx).is_local()
+    {
+        cx.open_with_system(&abs_path);
+        return;
+    }
     let project_path = workspace
         .project()
         .update(cx, |project, cx| project.find_project_path(&abs_path, cx));

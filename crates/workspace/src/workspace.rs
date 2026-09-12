@@ -989,6 +989,44 @@ pub fn prompt_for_open_path_and_open(
 }
 
 pub fn init(app_state: Arc<AppState>, cx: &mut App) {
+    let update_language = |cx: &mut App| {
+        let language = match WorkspaceSettings::get_global(cx).app_language {
+            settings::AppLanguage::Auto => match sys_locale::get_locale()
+                .unwrap_or_default()
+                .split(['-', '_'])
+                .next()
+                .unwrap_or("en")
+            {
+                "fr" => ui::UiLanguage::French,
+                "de" => ui::UiLanguage::German,
+                "es" => ui::UiLanguage::Spanish,
+                _ => ui::UiLanguage::English,
+            },
+            settings::AppLanguage::English => ui::UiLanguage::English,
+            settings::AppLanguage::French => ui::UiLanguage::French,
+            settings::AppLanguage::German => ui::UiLanguage::German,
+            settings::AppLanguage::Spanish => ui::UiLanguage::Spanish,
+        };
+        ui::set_language(language, cx);
+    };
+    update_language(cx);
+    cx.observe_global::<SettingsStore>(move |cx| update_language(cx))
+        .detach();
+
+    #[cfg(target_os = "macos")]
+    {
+        let update_status_item = |cx: &mut App| {
+            cx.set_status_item(
+                WorkspaceSettings::get_global(cx)
+                    .show_in_menu_bar
+                    .then_some("Zloppenheimer"),
+            )
+            .log_err();
+        };
+        update_status_item(cx);
+        cx.observe_global::<SettingsStore>(move |cx| update_status_item(cx))
+            .detach();
+    }
     component::init();
     theme_preview::init(cx);
     toast_layer::init(cx);
@@ -1640,6 +1678,12 @@ pub struct Workspace {
     _dev_container_task: Option<Task<Result<()>>>,
     _panels_task: Option<Task<Result<()>>>,
     sidebar_focus_handle: Option<FocusHandle>,
+    /// When the window has a workspace sidebar, the sidebar renders the
+    /// left/right dock panels itself, so those docks must not also draw them.
+    panels_hosted_in_sidebar: bool,
+    /// Set when revealing a sidebar-hosted panel switched its dock away from a
+    /// visible agent panel, so that hiding it can bring the agent panel back.
+    agent_panel_displaced_by_sidebar: bool,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     /// Shared with the parent `MultiWorkspace` and any sibling workspaces: holds
     /// the id of the single workspace currently presented in this OS window.
@@ -2146,6 +2190,8 @@ impl Workspace {
             last_open_dock_positions: Vec::new(),
             removing: false,
             sidebar_focus_handle: None,
+            panels_hosted_in_sidebar: false,
+            agent_panel_displaced_by_sidebar: false,
             multi_workspace,
             active_workspace_id: None,
             active_worktree_creation: ActiveWorktreeCreation::default(),
@@ -2867,6 +2913,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        for pane in self.panes.clone() {
+            pane.update(cx, |pane, cx| {
+                pane.remove_item(panel.entity_id(), false, false, window, cx);
+            });
+        }
         for dock in [&self.left_dock, &self.bottom_dock, &self.right_dock] {
             dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
         }
@@ -2878,6 +2929,154 @@ impl Workspace {
 
     pub fn set_sidebar_focus_handle(&mut self, handle: Option<FocusHandle>) {
         self.sidebar_focus_handle = handle;
+    }
+
+    pub fn set_panels_hosted_in_sidebar(&mut self, hosted: bool, cx: &mut Context<Self>) {
+        if self.panels_hosted_in_sidebar != hosted {
+            self.panels_hosted_in_sidebar = hosted;
+            cx.notify();
+        }
+    }
+
+    /// The agent panel keeps its dock: it is the primary surface of the window
+    /// rather than an auxiliary panel, and it is far too wide for the sidebar.
+    /// Disabled panels keep their dock too, so that the dock, the sidebar rail
+    /// and the sidebar content all agree on which panels the sidebar owns.
+    pub fn is_panel_hosted_in_sidebar(&self, panel: &dyn PanelHandle, cx: &App) -> bool {
+        self.panels_hosted_in_sidebar && !panel.is_agent_panel(cx) && panel.enabled(cx)
+    }
+
+    /// The panels the sidebar is responsible for rendering, in dock order.
+    pub fn sidebar_hosted_panels(&self, cx: &App) -> Vec<Arc<dyn PanelHandle>> {
+        [&self.left_dock, &self.right_dock]
+            .into_iter()
+            .flat_map(|dock| dock.read(cx).panel_handles().cloned().collect::<Vec<_>>())
+            .filter(|panel| self.is_panel_hosted_in_sidebar(panel.as_ref(), cx))
+            .collect()
+    }
+
+    /// The sidebar-hosted panel that is currently revealed, if any. Derived from
+    /// dock state so that the regular panel actions (`ToggleFocus` and friends)
+    /// and the status bar buttons keep working unchanged.
+    pub fn revealed_sidebar_panel(&self, cx: &App) -> Option<Arc<dyn PanelHandle>> {
+        [&self.left_dock, &self.right_dock]
+            .into_iter()
+            .filter(|dock| Some(dock.read(cx).position()) != self.zoomed_position)
+            .filter_map(|dock| dock.read(cx).visible_panel().cloned())
+            .find(|panel| self.is_panel_hosted_in_sidebar(panel.as_ref(), cx))
+    }
+
+    /// Reveals a sidebar-hosted panel, or hides it when it is already revealed.
+    pub fn toggle_sidebar_hosted_panel(
+        &mut self,
+        panel_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let already_revealed = self
+            .revealed_sidebar_panel(cx)
+            .is_some_and(|panel| panel.panel_id() == panel_id);
+        if already_revealed {
+            self.hide_sidebar_hosted_panels(window, cx);
+            return;
+        }
+
+        let hosted_docks = [self.left_dock.clone(), self.right_dock.clone()];
+        for dock in &hosted_docks {
+            let panel_index = dock
+                .read(cx)
+                .panel_handles()
+                .position(|panel| panel.panel_id() == panel_id);
+            let Some(panel_index) = panel_index else {
+                continue;
+            };
+            self.prepare_sidebar_hosted_panel(dock, panel_index, window, cx);
+            dock.update(cx, |dock, cx| {
+                dock.activate_panel(panel_index, window, cx);
+                dock.set_open(true, window, cx);
+                if let Some(panel) = dock.active_panel() {
+                    panel.activation_focus_handle(cx).focus(window, cx);
+                }
+            });
+            break;
+        }
+
+        cx.notify();
+        self.serialize_workspace(window, cx);
+    }
+
+    fn prepare_sidebar_hosted_panel(
+        &mut self,
+        dock: &Entity<Dock>,
+        panel_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let hosted = dock
+            .read(cx)
+            .panel_handles()
+            .nth(panel_index)
+            .is_some_and(|panel| {
+                dock.read(cx).position().axis() == Axis::Horizontal
+                    && self.is_panel_hosted_in_sidebar(panel.as_ref(), cx)
+            });
+        if !hosted {
+            return;
+        }
+        // Panel actions and rail clicks share a single sidebar surface.
+        for other_dock in [self.left_dock.clone(), self.right_dock.clone()] {
+            if &other_dock != dock {
+                self.conceal_sidebar_hosted_panel(&other_dock, window, cx);
+            }
+        }
+        if dock
+            .read(cx)
+            .visible_panel()
+            .is_some_and(|panel| panel.is_agent_panel(cx))
+        {
+            self.agent_panel_displaced_by_sidebar = true;
+        }
+    }
+
+    /// Hides whichever sidebar-hosted panel is revealed, returning the sidebar to
+    /// its own content.
+    pub fn hide_sidebar_hosted_panels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for dock in [self.left_dock.clone(), self.right_dock.clone()] {
+            self.conceal_sidebar_hosted_panel(&dock, window, cx);
+        }
+        cx.notify();
+        self.serialize_workspace(window, cx);
+    }
+
+    /// Puts away the hosted panel a dock is showing. When revealing it had
+    /// displaced the agent panel in the same dock, the dock goes back to the
+    /// agent panel instead of closing, so the agent panel is not lost along
+    /// with the panel that borrowed its dock.
+    fn conceal_sidebar_hosted_panel(
+        &mut self,
+        dock: &Entity<Dock>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let showing_hosted_panel = dock
+            .read(cx)
+            .visible_panel()
+            .is_some_and(|panel| self.is_panel_hosted_in_sidebar(panel.as_ref(), cx));
+        if !showing_hosted_panel {
+            return;
+        }
+        let agent_panel_index = dock
+            .read(cx)
+            .panel_handles()
+            .position(|panel| panel.is_agent_panel(cx));
+        let restore_agent_panel = agent_panel_index.is_some()
+            && std::mem::take(&mut self.agent_panel_displaced_by_sidebar);
+        dock.update(cx, |dock, cx| match agent_panel_index {
+            Some(agent_panel_index) if restore_agent_panel => {
+                dock.activate_panel(agent_panel_index, window, cx);
+            }
+            _ => dock.set_open(false, window, cx),
+        });
     }
 
     pub fn status_bar_visible(&self, cx: &App) -> bool {
@@ -4724,8 +4923,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<Arc<dyn PanelHandle>> {
         let mut panel = None;
-        for dock in self.all_docks() {
+        for dock in self.all_docks().map(Clone::clone) {
             if let Some(panel_index) = dock.read(cx).panel_index_for_proto_id(panel_id) {
+                self.prepare_sidebar_hosted_panel(&dock, panel_index, window, cx);
                 panel = dock.update(cx, |dock, cx| {
                     dock.activate_panel(panel_index, window, cx);
                     dock.set_open(true, window, cx);
@@ -4750,10 +4950,25 @@ impl Workspace {
         cx: &mut Context<Self>,
         should_focus: &mut dyn FnMut(&dyn PanelHandle, &mut Window, &mut Context<Dock>) -> bool,
     ) -> Option<Arc<dyn PanelHandle>> {
+        if let Some(panel) = self.panel::<T>(cx)
+            && let Some(item) = panel.workspace_item(window, cx)
+        {
+            let position = panel.position(window, cx);
+            let dock = self.dock_at_position(position).clone();
+            let focus = dock.update(cx, |_, cx| should_focus(&panel, window, cx));
+            self.close_panel_dock::<T>(window, cx);
+            panel.set_active(true, window, cx);
+            self.show_panel_item(item, focus, window, cx);
+            if focus {
+                panel.activation_focus_handle(cx).focus(window, cx);
+            }
+            return Some(Arc::new(panel));
+        }
         let mut result_panel = None;
         let mut serialize = false;
-        for dock in self.all_docks() {
+        for dock in self.all_docks().map(Clone::clone) {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
+                self.prepare_sidebar_hosted_panel(&dock, panel_index, window, cx);
                 let mut focus_center = false;
                 let panel = dock.update(cx, |dock, cx| {
                     dock.activate_panel(panel_index, window, cx);
@@ -4791,14 +5006,36 @@ impl Workspace {
 
     /// Open the panel of the given type
     pub fn open_panel<T: Panel>(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for dock in self.all_docks() {
+        if let Some(panel) = self.panel::<T>(cx)
+            && let Some(item) = panel.workspace_item(window, cx)
+        {
+            self.close_panel_dock::<T>(window, cx);
+            panel.set_active(true, window, cx);
+            self.show_panel_item(item, false, window, cx);
+            return;
+        }
+        for dock in self.all_docks().map(Clone::clone) {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
+                self.prepare_sidebar_hosted_panel(&dock, panel_index, window, cx);
                 dock.update(cx, |dock, cx| {
                     dock.activate_panel(panel_index, window, cx);
                     dock.set_open(true, window, cx);
                 });
             }
         }
+    }
+
+    fn show_panel_item(
+        &mut self,
+        item: Box<dyn ItemHandle>,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.activate_item(item.as_ref(), true, focus, window, cx) {
+            self.add_item_to_active_pane(item, None, focus, window, cx);
+        }
+        cx.notify();
     }
 
     /// Open the panel of the given type, dismissing any zoomed items that
@@ -4813,6 +5050,18 @@ impl Workspace {
     }
 
     pub fn close_panel<T: Panel>(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = self.panel::<T>(cx) {
+            for pane in &self.panes {
+                pane.update(cx, |pane, cx| {
+                    pane.remove_item(panel.entity_id(), false, false, window, cx);
+                });
+            }
+            panel.set_active(false, window, cx);
+        }
+        self.close_panel_dock::<T>(window, cx);
+    }
+
+    fn close_panel_dock<T: Panel>(&self, window: &mut Window, cx: &mut Context<Self>) {
         for dock in self.all_docks().iter() {
             dock.update(cx, |dock, cx| {
                 if dock.panel::<T>().is_some() {
@@ -8636,6 +8885,15 @@ impl Workspace {
             return None;
         }
 
+        // Panels the sidebar hosts are drawn there instead. The bottom dock is
+        // left alone: a terminal or debugger is unusable at sidebar width.
+        if position.axis() == Axis::Horizontal
+            && let Some(panel) = dock.read(cx).visible_panel()
+            && self.is_panel_hosted_in_sidebar(panel.as_ref(), cx)
+        {
+            return None;
+        }
+
         let leader_border = dock.read(cx).active_panel().and_then(|panel| {
             let pane = panel.pane(cx)?;
             let follower_states = &self.follower_states;
@@ -10332,12 +10590,24 @@ pub async fn apply_restored_multiworkspace_state(
             .ok();
     }
 
-    if *sidebar_open {
-        window_handle
-            .update(cx, |multi_workspace, _, cx| {
-                multi_workspace.restore_open_sidebar(cx);
-            })
-            .ok();
+    // `None` means nothing was persisted for this window, so the sidebar keeps
+    // whatever default the window was created with.
+    match sidebar_open {
+        Some(true) => {
+            window_handle
+                .update(cx, |multi_workspace, _, cx| {
+                    multi_workspace.restore_open_sidebar(cx);
+                })
+                .ok();
+        }
+        Some(false) => {
+            window_handle
+                .update(cx, |multi_workspace, _, cx| {
+                    multi_workspace.restore_closed_sidebar(cx);
+                })
+                .ok();
+        }
+        None => {}
     }
 
     if let Some(sidebar_state) = sidebar_state {
@@ -18724,10 +18994,10 @@ mod tests {
         let (workspace, _cx) =
             cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
 
-        // Test with status bar shown (default)
+        // Test with the status bar hidden by default
         workspace.read_with(cx, |workspace, cx| {
             let visible = workspace.status_bar_visible(cx);
-            assert!(visible, "Status bar should be visible by default");
+            assert!(!visible, "Status bar should be hidden by default");
         });
 
         // Test with status bar hidden
@@ -19734,6 +20004,7 @@ mod tests {
         });
         let second_panel = workspace.update_in(cx, |workspace, window, cx| {
             let panel = cx.new(|cx| SecondTestPanel {
+                position: DockPosition::Bottom,
                 focus_handle: cx.focus_handle(),
                 zoomed: false,
             });
@@ -19810,6 +20081,7 @@ mod tests {
 
         workspace.update_in(cx, |workspace, window, cx| {
             let panel = cx.new(|cx| SecondTestPanel {
+                position: DockPosition::Bottom,
                 focus_handle: cx.focus_handle(),
                 zoomed: false,
             });
@@ -19851,6 +20123,7 @@ mod tests {
 
         workspace.update_in(cx, |workspace, window, cx| {
             let panel = cx.new(|cx| SecondTestPanel {
+                position: DockPosition::Bottom,
                 focus_handle: cx.focus_handle(),
                 zoomed: false,
             });
@@ -19906,6 +20179,7 @@ mod tests {
 
         workspace.update_in(cx, |workspace, window, cx| {
             let panel = cx.new(|cx| SecondTestPanel {
+                position: DockPosition::Bottom,
                 focus_handle: cx.focus_handle(),
                 zoomed: false,
             });
@@ -19958,6 +20232,7 @@ mod tests {
 
         let second_panel = workspace.update_in(cx, |workspace, window, cx| {
             let panel = cx.new(|cx| SecondTestPanel {
+                position: DockPosition::Bottom,
                 focus_handle: cx.focus_handle(),
                 zoomed: false,
             });
@@ -19976,7 +20251,253 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    async fn test_sidebar_panel_switches_between_docks(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let left_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(left_panel.clone(), window, cx);
+            workspace.add_panel(right_panel.clone(), window, cx);
+            workspace.set_panels_hosted_in_sidebar(true, cx);
+
+            for panel in [&left_panel, &right_panel, &left_panel] {
+                workspace.toggle_sidebar_hosted_panel(panel.entity_id(), window, cx);
+                assert_eq!(
+                    workspace
+                        .revealed_sidebar_panel(cx)
+                        .map(|panel| panel.panel_id()),
+                    Some(panel.entity_id()),
+                    "the sidebar must display the panel whose icon was clicked",
+                );
+            }
+            workspace.toggle_sidebar_hosted_panel(left_panel.entity_id(), window, cx);
+            assert!(workspace.revealed_sidebar_panel(cx).is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_sidebar_panel_restores_displaced_agent_panel(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let left_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let agent_panel = cx.new(|cx| TestPanel::new_agent(DockPosition::Right, 100, cx));
+            let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 200, cx));
+            workspace.add_panel(left_panel.clone(), window, cx);
+            workspace.add_panel(agent_panel.clone(), window, cx);
+            workspace.add_panel(right_panel.clone(), window, cx);
+            workspace.set_panels_hosted_in_sidebar(true, cx);
+
+            let right_dock = workspace.right_dock().clone();
+            let visible_right_panel = |cx: &App| {
+                right_dock
+                    .read(cx)
+                    .visible_panel()
+                    .map(|panel| panel.panel_id())
+            };
+            let show_agent_panel = |window: &mut Window, cx: &mut Context<Workspace>| {
+                right_dock.update(cx, |dock, cx| {
+                    let agent_index = dock
+                        .panel_handles()
+                        .position(|panel| panel.is_agent_panel(cx))
+                        .expect("the agent panel was added to the right dock");
+                    dock.activate_panel(agent_index, window, cx);
+                    dock.set_open(true, window, cx);
+                });
+            };
+
+            // Revealing a hosted panel that shares the agent panel's dock, then
+            // hiding it again, must leave the agent panel where it was.
+            show_agent_panel(window, cx);
+            workspace.toggle_sidebar_hosted_panel(right_panel.entity_id(), window, cx);
+            assert_eq!(visible_right_panel(cx), Some(right_panel.entity_id()));
+            workspace.toggle_sidebar_hosted_panel(right_panel.entity_id(), window, cx);
+            assert!(workspace.revealed_sidebar_panel(cx).is_none());
+            assert_eq!(
+                visible_right_panel(cx),
+                Some(agent_panel.entity_id()),
+                "hiding the hosted panel must bring the agent panel back",
+            );
+
+            // Switching to a panel in the other dock puts the agent panel back too.
+            workspace.toggle_sidebar_hosted_panel(right_panel.entity_id(), window, cx);
+            workspace.toggle_sidebar_hosted_panel(left_panel.entity_id(), window, cx);
+            assert_eq!(
+                workspace
+                    .revealed_sidebar_panel(cx)
+                    .map(|panel| panel.panel_id()),
+                Some(left_panel.entity_id()),
+            );
+            assert_eq!(visible_right_panel(cx), Some(agent_panel.entity_id()));
+            workspace.hide_sidebar_hosted_panels(window, cx);
+            assert!(workspace.revealed_sidebar_panel(cx).is_none());
+            assert!(!workspace.left_dock().read(cx).is_open());
+            assert_eq!(visible_right_panel(cx), Some(agent_panel.entity_id()));
+
+            // When the agent panel was not showing, hiding closes the dock rather
+            // than opening it onto the agent panel.
+            right_dock.update(cx, |dock, cx| dock.set_open(false, window, cx));
+            workspace.toggle_sidebar_hosted_panel(right_panel.entity_id(), window, cx);
+            workspace.toggle_sidebar_hosted_panel(right_panel.entity_id(), window, cx);
+            assert!(!right_dock.read(cx).is_open());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_sidebar_panels_follow_standard_panel_actions(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let (left_panel, right_panel) = workspace.update_in(cx, |workspace, window, cx| {
+            let left_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let right_panel = cx.new(|cx| SecondTestPanel {
+                position: DockPosition::Right,
+                focus_handle: cx.focus_handle(),
+                zoomed: false,
+            });
+            workspace.add_panel(left_panel.clone(), window, cx);
+            workspace.add_panel(right_panel.clone(), window, cx);
+            workspace.set_panels_hosted_in_sidebar(true, cx);
+            workspace.toggle_sidebar_hosted_panel(left_panel.entity_id(), window, cx);
+            (left_panel, right_panel)
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_panel::<SecondTestPanel>(window, cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace
+                    .revealed_sidebar_panel(cx)
+                    .map(|panel| panel.panel_id()),
+                Some(right_panel.entity_id()),
+                "opening a panel must reveal it even when another sidebar panel is already open"
+            );
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_panel_focus::<TestPanel>(window, cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace
+                    .revealed_sidebar_panel(cx)
+                    .map(|panel| panel.panel_id()),
+                Some(left_panel.entity_id()),
+                "keyboard panel actions must select the same sidebar content as rail clicks"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_flexible_panel_has_visible_content_in_empty_workspace(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new_flexible(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+            workspace.open_panel::<TestPanel>(window, cx);
+        });
+        cx.simulate_resize(gpui::size(px(500.), px(700.)));
+        let bounds = cx
+            .debug_bounds("test-panel")
+            .expect("open panel is rendered");
+        assert!(
+            bounds.size.width > px(100.) && bounds.size.height > px(100.),
+            "the open panel must have usable space: {bounds:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_welcome_content_fits_small_window(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let welcome = cx.new_window_entity(|window, cx| {
+            crate::welcome::WelcomePage::new(workspace.downgrade(), true, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(400.), px(200.)));
+        cx.draw(
+            gpui::Point::default(),
+            gpui::size(px(400.), px(200.)),
+            |_, _| welcome.clone().into_any_element(),
+        );
+        let brand = cx
+            .debug_bounds("welcome-brand")
+            .expect("welcome brand is rendered");
+        let headline = cx
+            .debug_bounds("welcome-headline")
+            .expect("welcome headline is rendered");
+        assert!(
+            brand.top() >= px(0.),
+            "brand must be reachable at the top of the scroll area: {brand:?}"
+        );
+        assert!(
+            headline.left() >= px(0.) && headline.right() <= px(400.),
+            "headline must fit the available width: {headline:?}"
+        );
+        let actions = cx
+            .debug_bounds("welcome-actions")
+            .expect("welcome actions are rendered");
+        assert!(
+            actions.left() >= px(0.) && actions.right() <= px(400.),
+            "action buttons must fit the available width: {actions:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_zoomed_panel_is_not_also_rendered_in_sidebar(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.set_panels_hosted_in_sidebar(true, cx);
+            workspace.toggle_sidebar_hosted_panel(panel.entity_id(), window, cx);
+            panel
+        });
+        panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomIn));
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.zoomed, Some(panel.to_any().downgrade()));
+            assert!(
+                workspace.revealed_sidebar_panel(cx).is_none(),
+                "the fullscreen panel must not be rendered a second time in the sidebar"
+            );
+        });
+        panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomOut));
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace
+                    .revealed_sidebar_panel(cx)
+                    .map(|panel| panel.panel_id()),
+                Some(panel.entity_id())
+            );
+        });
+    }
+
     struct SecondTestPanel {
+        position: DockPosition,
         focus_handle: FocusHandle,
         zoomed: bool,
     }
@@ -20007,7 +20528,7 @@ mod tests {
         }
 
         fn position(&self, _: &Window, _: &App) -> DockPosition {
-            DockPosition::Bottom
+            self.position
         }
 
         fn position_is_valid(&self, _: DockPosition) -> bool {

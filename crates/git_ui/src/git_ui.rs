@@ -1,6 +1,9 @@
-use anyhow::anyhow;
+use anyhow::{Context as _, anyhow};
 use commit_modal::CommitModal;
 use editor::{Editor, actions::DiffClipboardWithSelectionData};
+use futures::AsyncReadExt as _;
+use gpui::http_client::{self, HttpRequestExt as _};
+use util::ResultExt as _;
 
 use workspace::{Toast, notifications::NotificationId};
 
@@ -60,13 +63,19 @@ pub mod unstaged_diff;
 pub use blame_ui::GitBlameStatus;
 pub use conflict_view::MergeConflictIndicator;
 
+gpui::actions!(git, [CloneGitHub]);
+
 pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);
     git_graph::init(cx);
 
     git_ui_core::set_branch_picker_builder(
-        |workspace, repository, window, cx| {
+        |workspace, repository, composer, window, cx| {
+            if composer {
+                let picker = branch_picker::composer_popover(workspace, repository, window, cx);
+                return cx.new(|cx| git_ui_core::GitPickerPopover::new(picker, cx));
+            }
             let picker = git_picker::popover(
                 workspace,
                 repository,
@@ -326,6 +335,23 @@ pub fn init(cx: &mut App) {
 
             workspace.toggle_modal(window, cx, |window, cx| {
                 GitCloneModal::show(panel, window, cx)
+            });
+        });
+        workspace.register_action(|workspace, _: &CloneGitHub, window, cx| {
+            let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
+                return;
+            };
+            workspace.toggle_modal(window, cx, |window, cx| {
+                let mut modal = GitCloneModal::show(panel, window, cx);
+                modal.github_search = true;
+                modal.repo_input.update(cx, |editor, cx| {
+                    editor.set_placeholder_text(
+                        &ui::localized("Search public GitHub repositories…", cx),
+                        window,
+                        cx,
+                    )
+                });
+                modal
             });
         });
         workspace.register_action(|workspace, _: &git::OpenModifiedFiles, window, cx| {
@@ -1267,10 +1293,30 @@ impl Component for GitStatusIcon {
     }
 }
 
+#[derive(Clone, serde::Deserialize)]
+struct GitHubRepository {
+    full_name: String,
+    description: Option<String>,
+    clone_url: String,
+    stargazers_count: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubRepositorySearch {
+    items: Vec<GitHubRepository>,
+}
+
 struct GitCloneModal {
     panel: Entity<GitPanel>,
     repo_input: Entity<Editor>,
     focus_handle: FocusHandle,
+    github_search: bool,
+    repositories: Vec<GitHubRepository>,
+    selected_repository: usize,
+    searching: bool,
+    search_error: Option<String>,
+    search_task: Option<Task<()>>,
+    _input_subscription: Subscription,
 }
 
 impl GitCloneModal {
@@ -1284,11 +1330,266 @@ impl GitCloneModal {
 
         window.focus(&focus_handle, cx);
 
+        let input_subscription = cx.subscribe(&repo_input, |this, _, event, cx| {
+            if this.github_search && matches!(event, editor::EditorEvent::BufferEdited) {
+                this.search_task.take();
+                this.repositories.clear();
+                this.search_error = None;
+                this.searching = false;
+                cx.notify();
+            }
+        });
         Self {
             panel,
             repo_input,
             focus_handle,
+            github_search: false,
+            repositories: Vec::new(),
+            selected_repository: 0,
+            searching: false,
+            search_error: None,
+            search_task: None,
+            _input_subscription: input_subscription,
         }
+    }
+
+    fn search_github(&mut self, cx: &mut Context<Self>) {
+        let query = self.repo_input.read(cx).text(cx).trim().to_owned();
+        if query.is_empty() {
+            return;
+        }
+        self.search_task.take();
+        self.searching = true;
+        self.search_error = None;
+        self.repositories.clear();
+        let http_client = cx.http_client();
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            let result: anyhow::Result<Vec<GitHubRepository>> = async {
+                let mut url =
+                    http_client::Url::parse("https://api.github.com/search/repositories")?;
+                url.query_pairs_mut()
+                    .append_pair("q", &query)
+                    .append_pair("per_page", "30");
+                let request = http_client::Request::builder()
+                    .method(http_client::Method::GET)
+                    .uri(url.as_str())
+                    .header("Accept", "application/vnd.github+json")
+                    .header("User-Agent", "Zloppenheimer")
+                    .timeout(std::time::Duration::from_secs(20))
+                    .body(http_client::AsyncBody::empty())?;
+                let mut response = http_client
+                    .send(request)
+                    .await
+                    .context("Could not search GitHub")?;
+                let status = response.status();
+                let mut body = String::new();
+                response
+                    .body_mut()
+                    .take(2 * 1024 * 1024)
+                    .read_to_string(&mut body)
+                    .await?;
+                if !status.is_success() {
+                    let message = serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("message")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_else(|| status.to_string());
+                    anyhow::bail!("GitHub search failed: {message}");
+                }
+                let result: GitHubRepositorySearch = serde_json::from_str(&body)
+                    .context("GitHub returned an invalid search response")?;
+                Ok(result.items)
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                this.searching = false;
+                this.selected_repository = 0;
+                match result {
+                    Ok(repositories) => {
+                        if repositories.is_empty() {
+                            this.search_error = Some("No repositories found".to_owned());
+                        }
+                        this.repositories = repositories;
+                    }
+                    Err(error) => this.search_error = Some(format!("{error:#}")),
+                }
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn clone_github_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repository) = self.repositories.get(self.selected_repository) else {
+            if !self.searching {
+                self.search_github(cx);
+            }
+            return;
+        };
+        let url = match http_client::Url::parse(&repository.clone_url) {
+            Ok(url) if url.scheme() == "https" && url.host_str() == Some("github.com") => url,
+            _ => {
+                self.search_error = Some("GitHub returned an invalid repository URL".to_owned());
+                cx.notify();
+                return;
+            }
+        };
+        self.panel
+            .update(cx, |panel, cx| panel.git_clone(url.to_string(), window, cx));
+        cx.emit(DismissEvent);
+    }
+
+    fn render_github(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .id("github-repository-search")
+            .key_context("Picker")
+            .w(px(560.))
+            .max_h(px(620.))
+            .bg(gpui::rgb(0x292B39))
+            .border_1()
+            .border_color(gpui::rgb(0x505061))
+            .rounded(px(12.))
+            .overflow_hidden()
+            .child(
+                div()
+                    .px(px(18.))
+                    .pt(px(18.))
+                    .pb(px(10.))
+                    .text_size(px(18.))
+                    .child(ui::localized("GitHub repository", cx)),
+            )
+            .child(
+                h_flex()
+                    .px(px(18.))
+                    .pb(px(14.))
+                    .gap(px(12.))
+                    .child(div().flex_1().min_w_0().child(self.repo_input.clone()))
+                    .child(
+                        Button::new("search-github", ui::localized("Search", cx))
+                            .disabled(self.searching)
+                            .on_click(cx.listener(|this, _, _, cx| this.search_github(cx))),
+                    ),
+            )
+            .when(self.searching, |this| {
+                this.child(
+                    div()
+                        .px(px(18.))
+                        .py(px(12.))
+                        .child(ui::localized("Searching…", cx)),
+                )
+            })
+            .when_some(self.search_error.as_ref(), |this, error| {
+                this.child(
+                    div()
+                        .px(px(18.))
+                        .py(px(12.))
+                        .text_color(gpui::rgb(0xD8B5BB))
+                        .child(error.clone()),
+                )
+            })
+            .child(
+                v_flex()
+                    .id("github-search-results")
+                    .overflow_y_scroll()
+                    .max_h(px(400.))
+                    .children(
+                        self.repositories
+                            .iter()
+                            .enumerate()
+                            .map(|(index, repository)| {
+                                ButtonLike::new(("github-repository", index))
+                                    .full_width()
+                                    .size(ButtonSize::None)
+                                    .when(index == self.selected_repository, |this| {
+                                        this.background(gpui::rgb(0x444052).into())
+                                    })
+                                    .child(
+                                        v_flex()
+                                            .w_full()
+                                            .px(px(18.))
+                                            .py(px(12.))
+                                            .gap(px(5.))
+                                            .child(
+                                                h_flex()
+                                                    .justify_between()
+                                                    .gap(px(12.))
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(14.))
+                                                            .child(repository.full_name.clone()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(11.))
+                                                            .text_color(gpui::rgb(0xAEB2C9))
+                                                            .child(format!(
+                                                                "★ {}",
+                                                                repository.stargazers_count
+                                                            )),
+                                                    ),
+                                            )
+                                            .when_some(
+                                                repository.description.clone(),
+                                                |this, description| {
+                                                    this.child(
+                                                        div()
+                                                            .text_size(px(12.))
+                                                            .text_color(gpui::rgb(0xB4B7CC))
+                                                            .child(description),
+                                                    )
+                                                },
+                                            ),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.selected_repository = index;
+                                        cx.notify();
+                                    }))
+                            }),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .p(px(14.))
+                    .gap(px(10.))
+                    .border_t_1()
+                    .border_color(gpui::rgb(0x424452))
+                    .child(
+                        Button::new("cancel-github", ui::localized("Cancel", cx))
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
+                    )
+                    .child(
+                        Button::new("clone-github-selection", ui::localized("Clone", cx))
+                            .disabled(self.repositories.is_empty())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.clone_github_selection(window, cx)
+                            })),
+                    ),
+            )
+            .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| cx.emit(DismissEvent)))
+            .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
+                this.clone_github_selection(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &menu::SelectNext, _, cx| {
+                if !this.repositories.is_empty() {
+                    this.selected_repository =
+                        (this.selected_repository + 1) % this.repositories.len();
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &menu::SelectPrevious, _, cx| {
+                if !this.repositories.is_empty() {
+                    this.selected_repository = (this.selected_repository + this.repositories.len()
+                        - 1)
+                        % this.repositories.len();
+                    cx.notify();
+                }
+            }))
     }
 }
 
@@ -1300,6 +1601,9 @@ impl Focusable for GitCloneModal {
 
 impl Render for GitCloneModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.github_search {
+            return self.render_github(cx).into_any_element();
+        }
         div()
             .elevation_3(cx)
             .w(rems(34.))
@@ -1344,6 +1648,7 @@ impl Render for GitCloneModal {
                 });
                 cx.emit(DismissEvent);
             }))
+            .into_any_element()
     }
 }
 

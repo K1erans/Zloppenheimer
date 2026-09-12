@@ -4731,7 +4731,7 @@ mod tests {
             MultiWorkspaceState {
                 active_workspace_id: Some(WorkspaceId(2)),
                 project_groups: vec![],
-                sidebar_open: true,
+                sidebar_open: Some(true),
                 sidebar_state: None,
             },
         )
@@ -4743,7 +4743,7 @@ mod tests {
             MultiWorkspaceState {
                 active_workspace_id: Some(WorkspaceId(3)),
                 project_groups: vec![],
-                sidebar_open: false,
+                sidebar_open: Some(false),
                 sidebar_state: None,
             },
         )
@@ -4786,19 +4786,19 @@ mod tests {
         let group_10 = &results[0];
         assert_eq!(group_10.active_workspace.workspace_id, WorkspaceId(2));
         assert_eq!(group_10.state.active_workspace_id, Some(WorkspaceId(2)));
-        assert_eq!(group_10.state.sidebar_open, true);
+        assert_eq!(group_10.state.sidebar_open, Some(true));
 
         // Window 20: active_workspace_id = 3 picks workspace 3 (paths /c), sidebar closed.
         let group_20 = &results[1];
         assert_eq!(group_20.active_workspace.workspace_id, WorkspaceId(3));
         assert_eq!(group_20.state.active_workspace_id, Some(WorkspaceId(3)));
-        assert_eq!(group_20.state.sidebar_open, false);
+        assert_eq!(group_20.state.sidebar_open, Some(false));
 
         // Orphan: no active_workspace_id, falls back to first workspace (id 4).
         let group_none = &results[2];
         assert_eq!(group_none.active_workspace.workspace_id, WorkspaceId(4));
         assert_eq!(group_none.state.active_workspace_id, None);
-        assert_eq!(group_none.state.sidebar_open, false);
+        assert_eq!(group_none.state.sidebar_open, None);
     }
 
     #[gpui::test]

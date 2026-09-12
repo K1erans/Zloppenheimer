@@ -35,6 +35,8 @@ pub struct Tab {
     selected: bool,
     position: TabPosition,
     close_side: TabCloseSide,
+    document_style: bool,
+    terminal_style: bool,
     start_slot: Option<AnyElement>,
     end_slot: Option<AnyElement>,
     children: SmallVec<[AnyElement; 2]>,
@@ -50,6 +52,8 @@ impl Tab {
             selected: false,
             position: TabPosition::First,
             close_side: TabCloseSide::End,
+            document_style: false,
+            terminal_style: false,
             start_slot: None,
             end_slot: None,
             children: SmallVec::new(),
@@ -58,6 +62,16 @@ impl Tab {
 
     pub fn position(mut self, position: TabPosition) -> Self {
         self.position = position;
+        self
+    }
+
+    pub fn terminal_style(mut self, enabled: bool) -> Self {
+        self.terminal_style = enabled;
+        self
+    }
+
+    pub fn document_style(mut self, enabled: bool) -> Self {
+        self.document_style = enabled;
         self
     }
 
@@ -125,16 +139,19 @@ impl RenderOnce for Tab {
         };
 
         let (start_slot, end_slot) = {
-            let start_slot = h_flex()
-                .size(START_TAB_SLOT_SIZE)
-                .justify_center()
-                .children(self.start_slot);
-
-            let end_slot = h_flex()
-                .size(END_TAB_SLOT_SIZE)
-                .justify_center()
-                .children(self.end_slot);
-
+            let start_slot = (!self.document_style || self.start_slot.is_some()).then(|| {
+                h_flex()
+                    .size(START_TAB_SLOT_SIZE)
+                    .justify_center()
+                    .children(self.start_slot)
+            });
+            let end_slot = (!self.document_style || self.end_slot.is_some()).then(|| {
+                h_flex()
+                    .size(END_TAB_SLOT_SIZE)
+                    .when(self.document_style, |this| this.size(px(10.)))
+                    .justify_center()
+                    .children(self.end_slot)
+            });
             match self.close_side {
                 TabCloseSide::End => (start_slot, end_slot),
                 TabCloseSide::Start => (end_slot, start_slot),
@@ -145,24 +162,56 @@ impl RenderOnce for Tab {
             .h(Tab::container_height(cx))
             .bg(tab_bg)
             .border_color(cx.theme().colors().border)
-            .map(|this| match self.position {
-                TabPosition::First => {
-                    if self.selected {
-                        this.pl_px().border_r_1().pb_px()
-                    } else {
-                        this.pl_px().pr_px().border_b_1()
+            .map(|this| {
+                if self.terminal_style {
+                    this.h(px(28.))
+                        .rounded(px(5.))
+                        .border_0()
+                        .bg(if self.selected {
+                            gpui::rgb(0x2D2F3B).into()
+                        } else {
+                            gpui::transparent_black()
+                        })
+                } else if self.document_style {
+                    this.h(px(48.))
+                        .border_b_2()
+                        .when(self.selected, |this| {
+                            this.w(px(174.))
+                                .min_w(px(174.))
+                                .max_w(px(174.))
+                                .bg(gpui::rgb(0x2B2D3A))
+                                .border_color(cx.theme().colors().border_focused)
+                        })
+                        .when(!self.selected, |this| {
+                            this.border_color(gpui::transparent_black())
+                        })
+                } else {
+                    match self.position {
+                        TabPosition::First => {
+                            if self.selected {
+                                this.pl_px().border_r_1().pb_px()
+                            } else {
+                                this.pl_px().pr_px().border_b_1()
+                            }
+                        }
+                        TabPosition::Last => {
+                            if self.selected {
+                                this.border_l_1().border_r_1().pb_px()
+                            } else {
+                                this.pl_px().border_b_1().border_r_1()
+                            }
+                        }
+                        TabPosition::Middle(Ordering::Equal) => {
+                            this.border_l_1().border_r_1().pb_px()
+                        }
+                        TabPosition::Middle(Ordering::Less) => {
+                            this.border_l_1().pr_px().border_b_1()
+                        }
+                        TabPosition::Middle(Ordering::Greater) => {
+                            this.border_r_1().pl_px().border_b_1()
+                        }
                     }
                 }
-                TabPosition::Last => {
-                    if self.selected {
-                        this.border_l_1().border_r_1().pb_px()
-                    } else {
-                        this.pl_px().border_b_1().border_r_1()
-                    }
-                }
-                TabPosition::Middle(Ordering::Equal) => this.border_l_1().border_r_1().pb_px(),
-                TabPosition::Middle(Ordering::Less) => this.border_l_1().pr_px().border_b_1(),
-                TabPosition::Middle(Ordering::Greater) => this.border_r_1().pl_px().border_b_1(),
             })
             .cursor_pointer()
             .child(
@@ -172,10 +221,22 @@ impl RenderOnce for Tab {
                     .h(Tab::content_height(cx))
                     .px(DynamicSpacing::Base04.px(cx))
                     .gap(DynamicSpacing::Base04.rems(cx))
+                    .when(self.document_style, |this| {
+                        this.h(px(46.)).px(px(18.)).gap(px(10.)).min_w_0().w_full()
+                    })
+                    .when(self.terminal_style, |this| {
+                        this.h(px(28.)).px(px(10.)).gap(px(8.))
+                    })
                     .text_color(text_color)
-                    .child(start_slot)
-                    .children(self.children)
-                    .child(end_slot),
+                    .children(start_slot)
+                    .map(|this| {
+                        if self.document_style {
+                            this.child(h_flex().flex_1().min_w_0().children(self.children))
+                        } else {
+                            this.children(self.children)
+                        }
+                    })
+                    .children(end_slot),
             )
     }
 }

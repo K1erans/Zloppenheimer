@@ -5,22 +5,17 @@ use gpui::{
     Action, AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     Subscription, Task, TaskExt, WeakEntity, Window,
 };
-use picker::{
-    Picker, PickerDelegate,
-    highlighted_match_with_paths::{HighlightedMatch, HighlightedMatchWithPaths},
-};
+use picker::{Picker, PickerDelegate};
 use remote::RemoteConnectionOptions;
 use settings::Settings;
-use ui::{ButtonLike, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
+use ui::{ButtonLike, ListItem, ListItemSpacing, Tooltip, prelude::*};
 use util::{ResultExt, paths::PathExt};
 use workspace::{
     MultiWorkspace, OpenMode, OpenOptions, ProjectGroupKey, RecentWorkspace,
     SerializedWorkspaceLocation, Workspace, WorkspaceDb, notifications::DetachAndPromptErr,
 };
 
-use zed_actions::OpenRemote;
-
-use crate::{highlights_for_path, icon_for_remote_connection, open_remote_project};
+use crate::{icon_for_remote_connection, open_remote_project};
 
 pub struct SidebarRecentProjects {
     pub picker: Entity<Picker<SidebarRecentProjectsDelegate>>,
@@ -46,7 +41,6 @@ impl SidebarRecentProjects {
                 workspaces: Vec::new(),
                 filtered_workspaces: Vec::new(),
                 selected_index: 0,
-                has_any_non_local_projects: false,
                 focus_handle: cx.focus_handle(),
             };
 
@@ -54,7 +48,7 @@ impl SidebarRecentProjects {
                 Picker::list(delegate, window, cx)
                     .list_measure_all()
                     .show_scrollbar(true)
-                    .initial_width(rems(18.))
+                    .initial_width(rems(350. / 16.))
                     .popover()
             });
 
@@ -106,7 +100,7 @@ impl Render for SidebarRecentProjects {
     fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .key_context("SidebarRecentProjects")
-            .w(rems(18.))
+            .w(px(350.))
             .child(self.picker.clone())
     }
 }
@@ -117,15 +111,11 @@ pub struct SidebarRecentProjectsDelegate {
     workspaces: Vec<RecentWorkspace>,
     filtered_workspaces: Vec<StringMatch>,
     selected_index: usize,
-    has_any_non_local_projects: bool,
     focus_handle: FocusHandle,
 }
 
 impl SidebarRecentProjectsDelegate {
     pub fn set_workspaces(&mut self, workspaces: Vec<RecentWorkspace>) {
-        self.has_any_non_local_projects = workspaces
-            .iter()
-            .any(|workspace| !matches!(workspace.location, SerializedWorkspaceLocation::Local));
         self.workspaces = workspaces;
     }
 }
@@ -139,8 +129,51 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
         "sidebar recent projects"
     }
 
-    fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
-        "Search projects…".into()
+    fn placeholder_text(&self, _window: &mut Window, cx: &mut App) -> Arc<str> {
+        ui::localized("Search projects…", cx).to_string().into()
+    }
+
+    fn dropdown_style(&self) -> bool {
+        true
+    }
+
+    fn project_switcher_style(&self) -> bool {
+        true
+    }
+
+    fn render_editor(
+        &self,
+        editor: &Arc<dyn ui_input::ErasedEditor>,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) -> Option<Div> {
+        Some(
+            h_flex()
+                .h(px(48.))
+                .px(px(14.))
+                .gap(px(10.))
+                .flex_none()
+                .border_b_1()
+                .border_color(gpui::rgb(0x424452))
+                .child(
+                    Icon::new(IconName::MagnifyingGlass)
+                        .size(IconSize::Custom(rems(17. / 16.)))
+                        .color(Color::Custom(gpui::rgb(0xB7B8C7).into())),
+                )
+                .child(div().flex_1().min_w_0().child(editor.render(window, cx)))
+                .child(
+                    div()
+                        .border_1()
+                        .border_color(gpui::rgb(0x4A4C5D))
+                        .rounded(px(4.))
+                        .px(px(4.))
+                        .py(px(2.))
+                        .text_size(px(10.))
+                        .line_height(px(12.))
+                        .text_color(gpui::rgb(0xB7B9CC))
+                        .child("Esc"),
+                ),
+        )
     }
 
     fn match_count(&self) -> usize {
@@ -175,17 +208,15 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
             .upgrade()
             .and_then(|ws| ws.read(cx).database_id());
 
+        let current_project_group = self
+            .workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).project_group_key(cx));
+
         let candidates: Vec<_> = self
             .workspaces
             .iter()
             .enumerate()
-            .filter(|(_, workspace)| {
-                Some(workspace.workspace_id) != current_workspace_id
-                    && !self
-                        .window_project_groups
-                        .iter()
-                        .any(|key| key.matches(&workspace.project_group_key()))
-            })
             .map(|(id, workspace)| {
                 let combined_string = workspace
                     .identity_paths
@@ -217,6 +248,28 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
             );
         }
 
+        self.filtered_workspaces.sort_by_key(|hit| {
+            self.workspaces
+                .get(hit.candidate_id)
+                .map(|workspace| {
+                    if Some(workspace.workspace_id) == current_workspace_id
+                        || current_project_group
+                            .as_ref()
+                            .is_some_and(|key| key.matches(&workspace.project_group_key()))
+                    {
+                        0
+                    } else if self
+                        .window_project_groups
+                        .iter()
+                        .any(|key| key.matches(&workspace.project_group_key()))
+                    {
+                        1
+                    } else {
+                        2
+                    }
+                })
+                .unwrap_or(2)
+        });
         self.selected_index = 0;
         Task::ready(())
     }
@@ -232,6 +285,15 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
+
+        if workspace
+            .read(cx)
+            .project_group_key(cx)
+            .matches(&recent_workspace.project_group_key())
+        {
+            cx.emit(DismissEvent);
+            return;
+        }
 
         match &recent_workspace.location {
             SerializedWorkspaceLocation::Local => {
@@ -294,7 +356,7 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
         &self,
         ix: usize,
         selected: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
         let hit = self.filtered_workspaces.get(ix)?;
@@ -318,32 +380,43 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
             _ => ordered_paths.join("\n").into(),
         };
 
-        let mut path_start_offset = 0;
-        let match_labels: Vec<_> = workspace
-            .identity_paths
-            .ordered_paths()
-            .map(|p| p.compact())
-            .map(|path| {
-                let (label, path_match) =
-                    highlights_for_path(path.as_ref(), &hit.positions, path_start_offset);
-                path_start_offset += path_match.text.len();
-                label
+        let in_this_window = self
+            .window_project_groups
+            .iter()
+            .any(|key| key.matches(&workspace.project_group_key()));
+        let current_workspace = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).database_id());
+        let is_current = Some(workspace.workspace_id) == current_workspace
+            || self.workspace.upgrade().is_some_and(|current| {
+                current
+                    .read(cx)
+                    .project_group_key(cx)
+                    .matches(&workspace.project_group_key())
+            });
+        let in_this_window = in_this_window || is_current;
+        let previous_in_window = ix
+            .checked_sub(1)
+            .and_then(|previous| self.filtered_workspaces.get(previous))
+            .and_then(|hit| self.workspaces.get(hit.candidate_id))
+            .is_some_and(|workspace| {
+                Some(workspace.workspace_id) == current_workspace
+                    || self
+                        .window_project_groups
+                        .iter()
+                        .any(|key| key.matches(&workspace.project_group_key()))
+            });
+        let heading = if ix == 0 || previous_in_window != in_this_window {
+            Some(if in_this_window {
+                "THIS WINDOW"
+            } else {
+                "RECENT PROJECTS"
             })
-            .collect();
-
-        let prefix = match &workspace.location {
-            SerializedWorkspaceLocation::Remote(options) => {
-                Some(SharedString::from(options.display_name()))
-            }
-            _ => None,
+        } else {
+            None
         };
-
-        let highlighted_match = HighlightedMatchWithPaths {
-            prefix,
-            match_label: HighlightedMatch::join(match_labels.into_iter().flatten(), ", "),
-            paths: Vec::new(),
-            active: false,
-        };
+        let name = workspace::welcome::project_name(&workspace.identity_paths);
 
         let icon = icon_for_remote_connection(match &workspace.location {
             SerializedWorkspaceLocation::Local => None,
@@ -351,91 +424,187 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
         });
 
         Some(
-            ListItem::new(ix)
-                .toggle_state(selected)
-                .inset(true)
-                .spacing(ListItemSpacing::Sparse)
-                .child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap_3()
-                        .flex_grow_1()
-                        .when(self.has_any_non_local_projects, |this| {
-                            this.child(Icon::new(icon).color(Color::Muted))
-                        })
-                        .child(highlighted_match.render(window, cx)),
-                )
-                .tooltip(move |_, cx| {
-                    Tooltip::with_meta(
-                        "Open Project in This Window",
-                        None,
-                        tooltip_path.clone(),
-                        cx,
+            v_flex()
+                .w_full()
+                .when_some(heading, |this, heading| {
+                    this.child(
+                        div()
+                            .pt(px(if ix == 0 { 14. } else { 18. }))
+                            .pb(px(8.))
+                            .px(px(14.))
+                            .text_size(px(11.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(0xAEB2C9))
+                            .child(ui::localized(heading, cx)),
                     )
                 })
+                .child(
+                    div().px(px(7.)).child(
+                        ListItem::new(ix)
+                            .height(px(if in_this_window { 38. } else { 36. }))
+                            .horizontal_padding(px(10.))
+                            .corner_radius(px(6.))
+                            .toggle_state(selected)
+                            .selected_background(gpui::rgb(0x444052).into())
+                            .spacing(ListItemSpacing::Dense)
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .gap(px(10.))
+                                    .child(
+                                        Icon::new(icon)
+                                            .size(IconSize::Custom(rems(17. / 16.)))
+                                            .color(Color::Custom(
+                                                gpui::rgb(if selected {
+                                                    0xCEC6DF
+                                                } else {
+                                                    0xB7B8C7
+                                                })
+                                                .into(),
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(if in_this_window { 14. } else { 13. }))
+                                            .line_height(px(if in_this_window { 18. } else { 16. }))
+                                            .text_color(gpui::rgb(if selected {
+                                                0xEEE8F5
+                                            } else {
+                                                0xD7DAE9
+                                            }))
+                                            .text_ellipsis()
+                                            .child(name),
+                                    )
+                                    .when(is_current, |this| {
+                                        this.child(
+                                            div()
+                                                .text_size(px(14.))
+                                                .line_height(px(18.))
+                                                .text_color(gpui::rgb(0xC9ABDF))
+                                                .child("✓"),
+                                        )
+                                    }),
+                            )
+                            .tooltip(move |_, cx| {
+                                Tooltip::with_meta(
+                                    "Open Project in This Window",
+                                    None,
+                                    tooltip_path.clone(),
+                                    cx,
+                                )
+                            }),
+                    ),
+                )
                 .into_any_element(),
         )
     }
 
     fn render_footer(&self, _: &mut Window, cx: &mut Context<Picker<Self>>) -> Option<AnyElement> {
-        let focus_handle = self.focus_handle.clone();
-
+        let actions = [
+            (
+                "open_local_folder",
+                "Local folder",
+                "Open a folder or existing Git checkout",
+                IconName::FolderAdd,
+                "workspace::Open",
+            ),
+            (
+                "clone_git_url",
+                "Git URL",
+                "Clone a repository from a remote URL",
+                IconName::Link,
+                "git::Clone",
+            ),
+            (
+                "clone_github",
+                "GitHub repository",
+                "Find and clone a GitHub repository",
+                IconName::Github,
+                "git::CloneGitHub",
+            ),
+        ];
         Some(
             v_flex()
-                .p_1p5()
-                .flex_1()
-                .gap_1()
+                .pb(px(8.))
                 .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
-                .child({
-                    let open_action = workspace::Open {
-                        create_new_window: Some(false),
-                    };
-
-                    ButtonLike::new("open_local_folder")
+                .border_color(gpui::rgb(0x424452))
+                .child(
+                    div()
+                        .pt(px(14.))
+                        .pb(px(8.))
+                        .px(px(14.))
+                        .text_size(px(11.))
+                        .line_height(px(16.))
+                        .text_color(gpui::rgb(0xAEB2C9))
+                        .child(ui::localized("ADD PROJECT", cx)),
+                )
+                .children(actions.map(|(id, label, description, icon, action_name)| {
+                    ButtonLike::new(id)
+                        .full_width()
+                        .height(px(60.).into())
+                        .size(ButtonSize::None)
+                        .style(ButtonStyle::Transparent)
                         .child(
                             h_flex()
                                 .w_full()
-                                .gap_1()
-                                .justify_between()
-                                .child(Label::new("Open Local Folders"))
-                                .child(KeyBinding::for_action_in(&open_action, &focus_handle, cx)),
+                                .px(px(15.))
+                                .gap(px(12.))
+                                .child(
+                                    h_flex().w(px(22.)).flex_none().justify_center().child(
+                                        Icon::new(icon)
+                                            .size(IconSize::Medium)
+                                            .color(Color::Custom(gpui::rgb(0xC6BCD7).into())),
+                                    ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap(px(4.))
+                                        .child(
+                                            div()
+                                                .text_size(px(14.))
+                                                .line_height(px(20.))
+                                                .text_color(gpui::rgb(0xE1DEED))
+                                                .child(ui::localized(label, cx)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .line_height(px(17.))
+                                                .text_color(gpui::rgb(0xB4B7CC))
+                                                .child(ui::localized(description, cx)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(15.))
+                                        .line_height(px(18.))
+                                        .text_color(gpui::rgb(0xAEB0C6))
+                                        .child("›"),
+                                ),
                         )
                         .on_click(cx.listener(move |_, _, window, cx| {
-                            window.dispatch_action(open_action.boxed_clone(), cx);
-                            cx.emit(DismissEvent);
-                        }))
-                })
-                .child(
-                    ButtonLike::new("open_remote_folder")
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .gap_1()
-                                .justify_between()
-                                .child(Label::new("Open Remote Folder"))
-                                .child(KeyBinding::for_action(
-                                    &OpenRemote {
-                                        from_existing_connection: false,
+                            let action = if action_name == "workspace::Open" {
+                                Some(
+                                    workspace::Open {
                                         create_new_window: Some(false),
-                                    },
-                                    cx,
-                                )),
-                        )
-                        .on_click(cx.listener(|_, _, window, cx| {
-                            window.dispatch_action(
-                                OpenRemote {
-                                    from_existing_connection: false,
-                                    create_new_window: Some(false),
-                                }
-                                .boxed_clone(),
-                                cx,
-                            );
-                            cx.emit(DismissEvent);
-                        })),
-                )
-                .into_any(),
+                                    }
+                                    .boxed_clone(),
+                                )
+                            } else {
+                                cx.build_action(action_name, None).log_err()
+                            };
+                            if let Some(action) = action {
+                                window.dispatch_action(action, cx);
+                                cx.emit(DismissEvent);
+                            }
+                        }))
+                }))
+                .into_any_element(),
         )
     }
 }

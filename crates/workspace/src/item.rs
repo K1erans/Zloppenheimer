@@ -367,6 +367,10 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
     ) {
     }
 
+    fn show_tab_bar(&self) -> bool {
+        true
+    }
+
     fn show_toolbar(&self) -> bool {
         true
     }
@@ -564,6 +568,7 @@ pub trait ItemHandle: 'static + Send {
     fn breadcrumb_location(&self, cx: &App) -> ToolbarItemLocation;
     fn breadcrumbs(&self, cx: &App) -> Option<(Vec<HighlightedText>, Option<Font>)>;
     fn breadcrumb_prefix(&self, window: &mut Window, cx: &mut App) -> Option<gpui::AnyElement>;
+    fn show_tab_bar(&self, cx: &App) -> bool;
     fn show_toolbar(&self, cx: &App) -> bool;
     fn pixel_position_of_cursor(&self, cx: &App) -> Option<Point<Pixels>>;
     fn downgrade_item(&self) -> Box<dyn WeakItemHandle>;
@@ -1124,6 +1129,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn breadcrumb_prefix(&self, window: &mut Window, cx: &mut App) -> Option<gpui::AnyElement> {
         self.update(cx, |item, cx| item.breadcrumb_prefix(window, cx))
+    }
+
+    fn show_tab_bar(&self, cx: &App) -> bool {
+        self.read(cx).show_tab_bar()
     }
 
     fn show_toolbar(&self, cx: &App) -> bool {

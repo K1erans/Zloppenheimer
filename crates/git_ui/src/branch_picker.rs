@@ -109,6 +109,29 @@ pub fn popover(
     })
 }
 
+pub fn composer_popover(
+    workspace: WeakEntity<Workspace>,
+    repository: Option<Entity<Repository>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<BranchList> {
+    cx.new(|cx| {
+        let list = BranchList::new(
+            workspace,
+            repository,
+            BranchListStyle::Modal,
+            rems_from_px(400_f32),
+            window,
+            cx,
+        );
+        list.picker.update(cx, |picker, _| {
+            picker.delegate.show_footer = false;
+        });
+        list.focus_handle(cx).focus(window, cx);
+        list
+    })
+}
+
 pub fn select_popover(
     workspace: WeakEntity<Workspace>,
     repository: Option<Entity<Repository>>,

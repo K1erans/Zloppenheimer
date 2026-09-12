@@ -126,28 +126,22 @@ impl TerminalPanel {
     ) {
         let assistant_enabled = self.assistant_enabled;
         terminal_pane.update(cx, |pane, cx| {
-            pane.set_render_tab_bar_buttons(cx, move |pane, window, cx| {
+            pane.set_render_tab_bar_buttons(cx, move |pane, _window, cx| {
                 let split_context = pane
                     .active_item()
                     .and_then(|item| item.downcast::<TerminalView>())
                     .map(|terminal_view| terminal_view.read(cx).focus_handle.clone());
-                let has_focused_rename_editor = pane
-                    .active_item()
-                    .and_then(|item| item.downcast::<TerminalView>())
-                    .is_some_and(|view| view.read(cx).rename_editor_is_focused(window, cx));
-                if !pane.has_focus(window, cx)
-                    && !pane.context_menu_focused(window, cx)
-                    && !has_focused_rename_editor
-                {
-                    return (None, None);
-                }
                 let focus_handle = pane.focus_handle(cx);
                 let right_children = h_flex()
-                    .gap(DynamicSpacing::Base02.rems(cx))
+                    .gap(px(0.))
                     .child(
                         PopoverMenu::new("terminal-tab-bar-popover-menu")
                             .trigger_with_tooltip(
-                                IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
+                                IconButton::new("plus", IconName::Plus)
+                                    .width(px(28.))
+                                    .height(px(28.).into())
+                                    .corner_radius(px(4.))
+                                    .icon_size(IconSize::Custom(rems(1.))),
                                 Tooltip::text("New…"),
                             )
                             .anchor(Anchor::TopRight)
@@ -181,7 +175,10 @@ impl TerminalPanel {
                         PopoverMenu::new("terminal-pane-tab-bar-split")
                             .trigger_with_tooltip(
                                 IconButton::new("terminal-pane-split", IconName::Split)
-                                    .icon_size(IconSize::Small),
+                                    .width(px(28.))
+                                    .height(px(28.).into())
+                                    .corner_radius(px(4.))
+                                    .icon_size(IconSize::Custom(rems(1.))),
                                 Tooltip::text("Split Pane"),
                             )
                             .anchor(Anchor::TopRight)
@@ -204,8 +201,11 @@ impl TerminalPanel {
                     )
                     .child({
                         let zoomed = pane.is_zoomed();
-                        IconButton::new("toggle_zoom", IconName::Maximize)
-                            .icon_size(IconSize::Small)
+                        IconButton::new("toggle_zoom", IconName::ChevronUp)
+                            .width(px(28.))
+                            .height(px(28.).into())
+                            .corner_radius(px(4.))
+                            .icon_size(IconSize::Custom(rems(1.)))
                             .toggle_state(zoomed)
                             .selected_icon(IconName::Minimize)
                             .on_click(cx.listener(|pane, _, window, cx| {
@@ -1323,6 +1323,7 @@ pub fn new_terminal_pane(
             window,
             cx,
         );
+        pane.set_terminal_style(true, cx);
         pane.set_zoomed(zoomed, cx);
         pane.set_can_navigate(false, cx);
         pane.display_nav_history_buttons(None);

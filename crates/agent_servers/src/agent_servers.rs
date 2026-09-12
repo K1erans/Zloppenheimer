@@ -133,3 +133,36 @@ pub fn load_proxy_env(cx: &mut App) -> HashMap<String, String> {
 
     env
 }
+
+pub fn test_custom_agent_connection(
+    configuration: settings::CustomAgentServerSettings,
+    project: Entity<Project>,
+    cx: &mut App,
+) -> Task<Result<()>> {
+    let project::agent_server_store::CustomAgentServerSettings::Custom {
+        command,
+        working_directory,
+        ..
+    } = configuration.into()
+    else {
+        return Task::ready(Err(anyhow::anyhow!(
+            "Only custom ACP commands can be tested here"
+        )));
+    };
+    let store = project.read(cx).agent_server_store().downgrade();
+    cx.spawn(async move |cx| {
+        let connection = AcpConnection::stdio(
+            AgentId::new("connection-test"),
+            project,
+            command,
+            working_directory,
+            store,
+            None,
+            HashMap::default(),
+            cx,
+        )
+        .await?;
+        drop(connection);
+        Ok(())
+    })
+}

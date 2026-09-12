@@ -52,6 +52,7 @@ pub struct ThreadItem {
     focused: bool,
     hovered: bool,
     rounded: bool,
+    compact: bool,
     is_truncated: bool,
     added: Option<usize>,
     removed: Option<usize>,
@@ -87,6 +88,7 @@ impl ThreadItem {
             focused: false,
             hovered: false,
             rounded: false,
+            compact: false,
             is_truncated: true,
             added: None,
             removed: None,
@@ -104,6 +106,11 @@ impl ThreadItem {
 
     pub fn timestamp(mut self, timestamp: impl Into<SharedString>) -> Self {
         self.timestamp = timestamp.into();
+        self
+    }
+
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
         self
     }
 
@@ -295,6 +302,7 @@ impl RenderOnce for ThreadItem {
                 .size_4()
                 .flex_none()
                 .justify_center()
+                .when(self.compact, |this| this.w(px(24.)).justify_start())
                 .when(!icon_visible, |this| this.invisible())
         };
         let icon_color = self.icon_color.unwrap_or(Color::Muted);
@@ -359,6 +367,7 @@ impl RenderOnce for ThreadItem {
             title_slot
         } else if self.title_generating {
             Label::new(title)
+                .when(self.compact, |label| label.size(LabelSize::XSmall))
                 .color(Color::Muted)
                 .with_animation(
                     "generating-title",
@@ -370,13 +379,15 @@ impl RenderOnce for ThreadItem {
                 .into_any_element()
         } else if highlight_positions.is_empty() {
             Label::new(title)
+                .when(self.compact, |label| label.size(LabelSize::XSmall))
                 .when_some(self.title_label_color, |label, color| label.color(color))
-                .when(!opaque_window, |label| label.truncate())
+                .when(!opaque_window || self.compact, |label| label.truncate())
                 .into_any_element()
         } else {
             HighlightedLabel::new(title, highlight_positions)
+                .when(self.compact, |label| label.size(LabelSize::XSmall))
                 .when_some(self.title_label_color, |label, color| label.color(color))
-                .when(!opaque_window, |label| label.truncate())
+                .when(!opaque_window || self.compact, |label| label.truncate())
                 .into_any_element()
         };
 
@@ -422,7 +433,7 @@ impl RenderOnce for ThreadItem {
             || has_project_paths
             || has_worktree
             || has_diff_stats
-            || has_timestamp;
+            || (has_timestamp && !self.compact);
 
         v_flex()
             .id(self.id.clone())
@@ -434,6 +445,9 @@ impl RenderOnce for ThreadItem {
             .w_full()
             .py_1()
             .px_1p5()
+            .when(self.compact, |this| {
+                this.px(px(11.)).py(px(7.)).min_h(px(40.))
+            })
             .when(self.selected, |s| s.bg(color.element_active))
             .border_1()
             .border_color(gpui::transparent_black())
@@ -454,11 +468,25 @@ impl RenderOnce for ThreadItem {
                             .min_w_0()
                             .flex_1()
                             .gap_1p5()
+                            .when(self.compact, |this| this.gap_0())
                             .child(icon)
                             .child(title_label),
                     )
-                    .when(self.is_truncated && opaque_window, |this| {
-                        this.child(gradient_overlay)
+                    .when(
+                        self.is_truncated && opaque_window && !self.compact,
+                        |this| this.child(gradient_overlay),
+                    )
+                    .when(self.compact && !self.hovered, |this| {
+                        this.child(
+                            div()
+                                .w(px(28.))
+                                .flex_none()
+                                .text_right()
+                                .text_size(px(11.))
+                                .line_height(px(14.))
+                                .text_color(color.text_muted)
+                                .child(timestamp.clone()),
+                        )
                     })
                     .when(self.hovered, |this| {
                         this.when_some(self.action_slot, |this, slot| {

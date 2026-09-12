@@ -488,6 +488,8 @@ pub struct ButtonLike {
     pub(super) selected_style: Option<ButtonStyle>,
     pub(super) width: Option<DefiniteLength>,
     pub(super) height: Option<DefiniteLength>,
+    background: Option<Hsla>,
+    custom_style: Option<Box<dyn FnOnce(gpui::Stateful<Div>) -> gpui::Stateful<Div>>>,
     pub(super) layer: Option<ElevationIndex>,
     tab_index: Option<isize>,
     size: ButtonSize,
@@ -523,6 +525,8 @@ impl ButtonLike {
             selected_style: None,
             width: None,
             height: None,
+            background: None,
+            custom_style: None,
             size: ButtonSize::Default,
             rounding: Some(ButtonLikeRounding::ALL),
             aria_label: None,
@@ -564,6 +568,25 @@ impl ButtonLike {
 
     pub fn height(mut self, height: DefiniteLength) -> Self {
         self.height = Some(height);
+        self
+    }
+
+    pub fn corner_radius(mut self, radius: gpui::Pixels) -> Self {
+        self.rounding = None;
+        self.base = self.base.rounded(radius);
+        self
+    }
+
+    pub fn custom_style(
+        mut self,
+        style: impl FnOnce(gpui::Stateful<Div>) -> gpui::Stateful<Div> + 'static,
+    ) -> Self {
+        self.custom_style = Some(Box::new(style));
+        self
+    }
+
+    pub fn background(mut self, background: Hsla) -> Self {
+        self.background = Some(background);
         self
     }
 
@@ -803,7 +826,9 @@ impl RenderOnce for ButtonLike {
                 ButtonSize::None => this.px_px(),
             })
             .border_color(style.enabled(self.layer, cx).border_color)
-            .bg(style.enabled(self.layer, cx).background)
+            .bg(self
+                .background
+                .unwrap_or(style.enabled(self.layer, cx).background))
             .when(self.disabled, |this| {
                 if self.cursor_style == CursorStyle::PointingHand {
                     this.cursor_not_allowed()
@@ -812,7 +837,10 @@ impl RenderOnce for ButtonLike {
                 }
             })
             .when(!self.disabled, |this| {
-                let hovered_style = style.hovered(self.layer, cx);
+                let mut hovered_style = style.hovered(self.layer, cx);
+                if let Some(background) = self.background {
+                    hovered_style.background = cx.theme().darken(background, 0.05, 0.2);
+                }
                 let focus_color =
                     |refinement: StyleRefinement| refinement.bg(hovered_style.background);
 
@@ -827,7 +855,9 @@ impl RenderOnce for ButtonLike {
                             this.focus_visible(focus_color)
                         }
                     })
-                    .active(|active| active.bg(style.active(cx).background))
+                    .active(|active| {
+                        active.bg(self.background.unwrap_or(style.active(cx).background))
+                    })
             })
             .when_some(
                 self.on_right_click.filter(|_| !self.disabled),
@@ -882,6 +912,7 @@ impl RenderOnce for ButtonLike {
                 }
                 this
             })
+            .when_some(self.custom_style, |this, style| style(this))
             .children(self.children)
     }
 }

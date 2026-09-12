@@ -5,14 +5,14 @@ pub mod pages;
 use agent_skills::SkillIndex;
 use anyhow::{Context as _, Result};
 use cloud_api_types::OrganizationConfiguration;
-use editor::{Editor, EditorEvent};
+use editor::{Editor, EditorElement, EditorEvent, EditorStyle};
 use futures::{StreamExt, channel::mpsc};
 use fuzzy::StringMatchCandidate;
 use gpui::{
-    Action, App, AsyncApp, ClipboardItem, DEFAULT_ADDITIONAL_WINDOW_SIZE, Div, Entity, FocusHandle,
-    Focusable, Global, KeyContext, ListState, ReadGlobal as _, Role, ScrollHandle, Stateful,
-    Subscription, Task, TitlebarOptions, UniformListScrollHandle, WeakEntity, Window, WindowBounds,
-    WindowHandle, WindowOptions, actions, div, list, point, prelude::*, px, uniform_list,
+    Action, App, AsyncApp, ClipboardItem, Div, Entity, FocusHandle, Focusable, Global, KeyContext,
+    ListState, ReadGlobal as _, Role, ScrollHandle, Stateful, Subscription, Task, TitlebarOptions,
+    UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions,
+    actions, div, list, point, prelude::*, px, uniform_list,
 };
 
 use language::Buffer;
@@ -37,9 +37,8 @@ use std::{
 };
 use theme_settings::ThemeSettings;
 use ui::{
-    Banner, ContextMenu, Divider, DropdownMenu, DropdownStyle, IconButtonShape, KeyBinding,
-    KeybindingHint, PopoverMenu, Scrollbars, Switch, Tooltip, TreeViewItem, WithScrollbar,
-    prelude::*,
+    Banner, ButtonLike, ContextMenu, Divider, DropdownMenu, DropdownStyle, IconButtonShape,
+    KeyBinding, PopoverMenu, Scrollbars, Switch, Tooltip, TreeViewItem, WithScrollbar, prelude::*,
 };
 
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
@@ -71,7 +70,7 @@ const HEADER_GROUP_TAB_INDEX: isize = 3;
 const CONTENT_CONTAINER_TAB_INDEX: isize = 4;
 const CONTENT_GROUP_TAB_INDEX: isize = 5;
 
-const SIDEBAR_WIDTH: Pixels = px(226.);
+const SIDEBAR_WIDTH: Pixels = px(260.);
 const CONTENT_MIN_WIDTH: Pixels = px(400.);
 
 actions!(
@@ -549,6 +548,7 @@ fn init_renderers(cx: &mut App) {
             },
         )
         .add_basic_renderer::<bool>(render_toggle_button)
+        .add_basic_renderer::<settings::ToolPermissionMode>(render_permission_preset)
         .add_basic_renderer::<String>(render_text_field)
         .add_basic_renderer::<SharedString>(render_text_field)
         .add_basic_renderer::<settings::SaturatingBool>(render_toggle_button)
@@ -574,7 +574,10 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::SnippetSortOrder>(render_dropdown)
         .add_basic_renderer::<settings::ClosePosition>(render_dropdown)
         .add_basic_renderer::<settings::DockSide>(render_dropdown)
-        .add_basic_renderer::<settings::TerminalDockPosition>(render_dropdown)
+        .add_basic_renderer::<settings::TerminalDockPosition>(render_terminal_location)
+        .add_basic_renderer::<language_model::Speed>(render_model_speed)
+        .add_basic_renderer::<settings::AppLanguage>(render_app_choice)
+        .add_basic_renderer::<settings::FileOpenDestination>(render_app_choice)
         .add_basic_renderer::<settings::DockPosition>(render_dropdown)
         .add_basic_renderer::<settings::SidebarDockPosition>(render_dropdown)
         .add_basic_renderer::<settings::GitGutterSetting>(render_dropdown)
@@ -873,7 +876,7 @@ fn open_settings_editor_with(
             .ui_font_size(cx)
             .into();
 
-        let default_bounds = DEFAULT_ADDITIONAL_WINDOW_SIZE;
+        let default_bounds = gpui::size(px(1440.), px(900.));
         let default_rem_size = 16.0;
         let scale_factor = current_rem_size / default_rem_size;
         let scaled_bounds: gpui::Size<Pixels> = default_bounds.map(|axis| axis * scale_factor);
@@ -891,7 +894,7 @@ fn open_settings_editor_with(
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Zed — Settings".into()),
+                    title: Some("Zloppenheimer — Settings".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(12.0), px(12.0))),
                 }),
@@ -958,6 +961,10 @@ pub struct SettingsWindow {
     opening_link: bool,
     search_bar: Entity<Editor>,
     search_task: Option<Task<()>>,
+    ai_page_state: Option<pages::AiPageState>,
+    selected_connection: Option<String>,
+    profile_page_state: Option<pages::ProfilePageState>,
+    embedded_keymap: Option<Entity<keymap_editor::KeymapEditor>>,
     /// Cached settings file buffers to avoid repeated disk I/O on each settings change
     project_setting_file_buffers: HashMap<ProjectPath, Entity<Buffer>>,
     /// Index into navbar_entries
@@ -1126,13 +1133,15 @@ impl SettingsPageItem {
         cx: &mut Context<SettingsWindow>,
     ) -> AnyElement {
         let file = settings_window.current_file.clone();
+        let card_layout =
+            settings_window.sub_page_stack.is_empty() && matches!(file, SettingsUiFile::User);
 
         let apply_padding = |element: Stateful<Div>| -> Stateful<Div> {
-            let element = element.pt_4();
-            if extra_bottom_padding {
+            let element = element.pt(px(9.));
+            if extra_bottom_padding && !card_layout {
                 element.pb_10()
             } else {
-                element.pb_4()
+                element.pb(px(9.))
             }
         };
 
@@ -1196,11 +1205,64 @@ impl SettingsPageItem {
 
         match self {
             SettingsPageItem::SectionHeader(header) => {
-                SettingsSectionHeader::new(SharedString::new_static(header)).into_any_element()
+                if card_layout {
+                    return div()
+                        .pb(px(16.))
+                        .text_size(px(14.))
+                        .line_height(px(20.))
+                        .text_color(gpui::rgb(0xCDCBDA))
+                        .child(ui::localized(header, cx))
+                        .into_any_element();
+                }
+                SettingsSectionHeader::new(ui::localized(header, cx)).into_any_element()
             }
             SettingsPageItem::SettingItem(setting_item) => {
                 let (field_with_padding, _) =
                     render_setting_item_inner(setting_item, true, false, cx);
+
+                if card_layout {
+                    let first_in_section = settings_window
+                        .visible_page_items()
+                        .take_while(|(index, _)| *index < item_index)
+                        .last()
+                        .is_none_or(|(_, item)| matches!(item, SettingsPageItem::SectionHeader(_)));
+                    return div()
+                        .when(extra_bottom_padding, |this| this.mb(px(16.)))
+                        .child(
+                            v_flex()
+                                .group("setting-item")
+                                .px(px(18.))
+                                .bg(gpui::rgb(0x282B37))
+                                .border_x_1()
+                                .border_color(gpui::rgb(0x3C3F4C))
+                                .when(first_in_section, |this| {
+                                    this.border_t_1().rounded_t(px(12.))
+                                })
+                                .when(extra_bottom_padding, |this| {
+                                    this.border_b_1().rounded_b(px(12.))
+                                })
+                                .child(
+                                    field_with_padding
+                                        .min_h(px(match setting_item.title {
+                                            "Projectless task folder" => 65.,
+                                            "Default permissions" => 69.,
+                                            "Full access" => 90.,
+                                            _ => 59.,
+                                        }))
+                                        .when(
+                                            matches!(
+                                                setting_item.title,
+                                                "Default permissions" | "Full access"
+                                            ),
+                                            |this| this.py(px(13.)),
+                                        )
+                                        .when(!first_in_section, |this| {
+                                            this.border_t_1().border_color(gpui::rgb(0x383B48))
+                                        }),
+                                ),
+                        )
+                        .into_any_element();
+                }
 
                 v_flex()
                     .group("setting-item")
@@ -1421,18 +1483,26 @@ fn render_settings_item_layout(
     h_flex()
         .id(title)
         .min_w_0()
+        .min_h(px(41.))
+        .gap(px(22.))
         .justify_between()
         .child(
             v_flex()
                 .relative()
-                .w_full()
-                .max_w_2_3()
+                .flex_1()
                 .min_w_0()
+                .gap(px(5.))
                 .child(
                     h_flex()
                         .w_full()
                         .gap_1()
-                        .child(Label::new(SharedString::new_static(title)))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .text_color(gpui::rgb(0xE0DEEA))
+                                .child(ui::localized(title, cx)),
+                        )
                         .when_some(reset_fn, |this, reset_to_default| {
                             this.child(
                                 IconButton::new("reset-to-default-btn", IconName::Undo)
@@ -1454,13 +1524,19 @@ fn render_settings_item_layout(
                         }),
                 )
                 .child(
-                    Label::new(SharedString::new_static(description))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .render_code_spans(),
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(17.))
+                        .text_color(gpui::rgb(0xA1A4B8))
+                        .child(
+                            Label::new(ui::localized(description, cx))
+                                .size(LabelSize::Custom(rems_from_px(12_f32)))
+                                .color(Color::Custom(gpui::rgb(0xA1A4B8).into()))
+                                .render_code_spans(),
+                        ),
                 ),
         )
-        .child(control)
+        .child(div().flex_none().child(control))
         .when(settings_window.sub_page_stack.is_empty(), |this| {
             this.child(render_settings_item_link(
                 description,
@@ -1967,11 +2043,7 @@ impl SettingsWindow {
         })
         .detach();
 
-        let title_bar = if !cfg!(target_os = "macos") {
-            Some(cx.new(|cx| PlatformTitleBar::new("settings-title-bar", cx)))
-        } else {
-            None
-        };
+        let title_bar = Some(cx.new(|cx| PlatformTitleBar::new("settings-title-bar", cx)));
 
         let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(0.0)).measure_all();
         list_state.set_scroll_handler(|_, _, _| {});
@@ -1993,6 +2065,10 @@ impl SettingsWindow {
             navbar_scroll_handle: UniformListScrollHandle::default(),
             search_bar,
             search_task: None,
+            ai_page_state: None,
+            selected_connection: None,
+            profile_page_state: None,
+            embedded_keymap: None,
             filter_table: vec![],
             has_query: false,
             content_handles: vec![],
@@ -2036,6 +2112,13 @@ impl SettingsWindow {
         this.fetch_files(window, cx);
         this.build_ui(window, cx);
         this.build_search_index();
+        if let Some(index) = this
+            .navbar_entries
+            .iter()
+            .position(|entry| entry.is_root && entry.title == "General")
+        {
+            this.open_navbar_entry_page(index);
+        }
 
         this.search_bar.update(cx, |editor, cx| {
             editor.focus_handle(cx).focus(window, cx);
@@ -2179,7 +2262,7 @@ impl SettingsWindow {
                     search_matches[entry.page_index][item_index]
                 } else {
                     search_matches[entry.page_index].iter().any(|b| *b)
-                        || search_matches[entry.page_index].is_empty()
+                        || (search_matches[entry.page_index].is_empty() && !has_query)
                 };
                 if included_in_search {
                     break;
@@ -2693,7 +2776,7 @@ impl SettingsWindow {
         if let Some((logical_index, navbar_entry_index)) = best_match.or(first_entry) {
             self.open_navbar_entry_page(navbar_entry_index);
             self.navbar_scroll_handle
-                .scroll_to_item(logical_index + 1, gpui::ScrollStrategy::Top);
+                .scroll_to_item(logical_index, gpui::ScrollStrategy::Top);
         }
     }
 
@@ -3017,6 +3100,9 @@ impl SettingsWindow {
         let has_query = !self.search_bar.read(cx).is_empty(cx);
         let (a11y_value, a11y_text_runs) =
             text_field_a11y_state("settings-ui-search", &self.search_bar, window, cx);
+        let mut text_style = window.text_style();
+        text_style.font_size = px(13.).into();
+        text_style.line_height = px(18.).into();
 
         h_flex()
             .id("settings-ui-search")
@@ -3025,18 +3111,29 @@ impl SettingsWindow {
             .aria_value(a11y_value)
             .track_focus(&self.search_bar.focus_handle(cx))
             .a11y_synthetic_children(a11y_text_runs)
-            .py_1()
-            .pl_1p5()
-            .pr_0p5()
-            .h_7()
-            .mb_3()
-            .gap_1p5()
-            .rounded_sm()
-            .bg(cx.theme().colors().editor_background)
+            .px(px(10.))
+            .h(px(34.))
+            .flex_none()
+            .gap(px(8.))
+            .rounded(px(7.))
+            .bg(cx.theme().colors().elevated_surface_background)
             .border_1()
-            .border_color(cx.theme().colors().border)
-            .child(Icon::new(IconName::MagnifyingGlass).color(Color::Muted))
-            .child(self.search_bar.clone())
+            .border_color(gpui::rgb(0x414453))
+            .child(
+                Icon::new(IconName::MagnifyingGlass)
+                    .size(IconSize::Custom(rems_from_px(15_f32)))
+                    .color(Color::Muted),
+            )
+            .child(EditorElement::new(
+                &self.search_bar,
+                EditorStyle {
+                    background: gpui::transparent_black(),
+                    text: text_style,
+                    local_player: cx.theme().players().local(),
+                    syntax: cx.theme().syntax().clone(),
+                    ..Default::default()
+                },
+            ))
             .when(has_query, |this| {
                 this.child(
                     IconButton::new("clear-btn", IconName::Close)
@@ -3056,20 +3153,6 @@ impl SettingsWindow {
         cx: &mut Context<SettingsWindow>,
     ) -> impl IntoElement {
         let visible_count = self.visible_navbar_entries().count();
-
-        let focus_keybind_label = if self
-            .navbar_focus_handle
-            .read(cx)
-            .handle
-            .contains_focused(window, cx)
-            || self
-                .visible_navbar_entries()
-                .any(|(_, entry)| entry.focus_handle.is_focused(window))
-        {
-            "Focus Content"
-        } else {
-            "Focus Navbar"
-        };
 
         let mut key_context = KeyContext::new_with_defaults();
         key_context.add("NavigationMenu");
@@ -3198,12 +3281,26 @@ impl SettingsWindow {
             }))
             .w(SIDEBAR_WIDTH)
             .h_full()
-            .p_2p5()
-            .when(cfg!(target_os = "macos"), |this| this.pt_10())
+            .px(px(12.))
+            .py(px(14.))
+            .gap(px(4.))
             .flex_none()
             .border_r_1()
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().panel_background)
+            .child(
+                ButtonLike::new("back-to-app")
+                    .height(px(36.).into())
+                    .size(ButtonSize::None)
+                    .full_width()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(original_window) = this.original_window {
+                            original_window.update(cx, |_, window, _| window.activate_window()).log_err();
+                        }
+                        window.remove_window();
+                    }))
+                    .child(div().w_full().text_left().px(px(11.)).text_size(px(14.)).line_height(px(18.)).text_color(gpui::rgb(0xCFCDDE)).child(format!("← {}", ui::localized("Back to app", cx))))
+            )
             .child(self.render_search(window, cx))
             .child(
                 v_flex()
@@ -3218,16 +3315,17 @@ impl SettingsWindow {
                     .child(
                         uniform_list(
                             "settings-ui-nav-bar",
-                            visible_count + 1,
+                            visible_count,
                             cx.processor(move |this, range: Range<usize>, _, cx| {
                                 this.visible_navbar_entries()
-                                    .skip(range.start.saturating_sub(1))
+                                    .skip(range.start)
                                     .take(range.len())
                                     .map(|(entry_index, entry)| {
                                         TreeViewItem::new(
                                             ("settings-ui-navbar-entry", entry_index),
-                                            entry.title,
+                                            ui::localized(entry.title, cx),
                                         )
+                                        .navigation_style(true)
                                         .track_focus(&entry.focus_handle)
                                         .root_item(entry.is_root)
                                         .toggle_state(this.is_navbar_entry_selected(entry_index))
@@ -3283,27 +3381,30 @@ impl SettingsWindow {
                     )
                     .vertical_scrollbar_for(&self.navbar_scroll_handle, window, cx),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .h_8()
-                    .p_2()
-                    .pb_0p5()
-                    .flex_shrink_0()
-                    .border_t_1()
-                    .border_color(cx.theme().colors().border_variant)
-                    .child(
-                        KeybindingHint::new(
-                            KeyBinding::for_action_in(
-                                &ToggleFocusNav,
-                                &self.navbar_focus_handle.focus_handle(cx),
-                                cx,
-                            ),
-                            cx.theme().colors().surface_background.opacity(0.5),
-                        )
-                        .suffix(focus_keybind_label),
-                    ),
-            )
+            .child(div().h(px(1.)).flex_none().bg(gpui::rgb(0x383A48)))
+            .children([
+                ("Themes…", Box::new(zed_actions::theme_selector::Toggle::default()) as Box<dyn Action>),
+                ("Icon Themes…", Box::new(zed_actions::icon_theme_selector::Toggle::default()) as Box<dyn Action>),
+                ("Extensions", Box::new(zed_actions::Extensions::default()) as Box<dyn Action>),
+            ].into_iter().map(|(label, action)| {
+                ButtonLike::new(label).full_width().size(ButtonSize::None).height(px(36.).into())
+                    .corner_radius(px(6.)).tab_index(0_isize)
+                    .child(h_flex().w_full().px(px(11.)).justify_between()
+                        .child(div().text_size(px(14.)).line_height(px(20.)).text_color(gpui::rgb(0xBFC1D1)).child(ui::localized(label, cx)))
+                        .child(KeyBinding::for_action(action.as_ref(), cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(original_window) = this.original_window {
+                            let action = action.boxed_clone();
+                            original_window.update(cx, |_, window, cx| {
+                                window.activate_window();
+                                window.dispatch_action(action, cx);
+                            }).log_err();
+                            window.remove_window();
+                        } else {
+                            window.dispatch_action(action.boxed_clone(), cx);
+                        }
+                    }))
+            }))
     }
 
     fn open_and_scroll_to_navbar_entry(
@@ -3364,7 +3465,7 @@ impl SettingsWindow {
                 .position(|(index, _)| index == navbar_entry_index)
         {
             self.navbar_scroll_handle
-                .scroll_to_item(logical_entry_index + 1, scroll_strategy);
+                .scroll_to_item(logical_entry_index, scroll_strategy);
         }
 
         // Page scroll handle updates the active item index
@@ -3583,11 +3684,16 @@ impl SettingsWindow {
         cx: &mut Context<SettingsWindow>,
     ) -> impl IntoElement {
         let current_page_index = self.current_page_index();
+        let card_layout =
+            self.sub_page_stack.is_empty() && matches!(self.current_file, SettingsUiFile::User);
         let mut page_content = v_flex()
             .id("settings-ui-page")
             .role(Role::Group)
             .aria_label("Settings Content")
-            .size_full();
+            .size_full()
+            .when(card_layout, |this| {
+                this.max_w(px(948.)).mx_auto().px(px(24.))
+            });
 
         let has_active_search = !self.search_bar.read(cx).is_empty(cx);
         let has_no_results = self.visible_page_items().next().is_none() && has_active_search;
@@ -3614,11 +3720,22 @@ impl SettingsWindow {
                     if index == 0 {
                         return div()
                             .px_8()
+                            .when(card_layout, |this| this.px_0().pb(px(16.)))
                             .when(this.sub_page_stack.is_empty(), |this| {
                                 this.when_some(root_nav_label, |this, title| {
-                                    this.child(
-                                        Label::new(title).size(LabelSize::Large).mt_2().mb_3(),
-                                    )
+                                    if card_layout {
+                                        this.child(
+                                            div()
+                                                .text_size(px(26.))
+                                                .line_height(px(34.))
+                                                .text_color(gpui::rgb(0xECECF2))
+                                                .child(ui::localized(title, cx)),
+                                        )
+                                    } else {
+                                        this.child(
+                                            Label::new(title).size(LabelSize::Large).mt_2().mb_3(),
+                                        )
+                                    }
                                 })
                             })
                             .into_any_element();
@@ -3765,13 +3882,62 @@ impl SettingsWindow {
         }
     }
 
-    fn render_page(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<SettingsWindow>,
-    ) -> impl IntoElement {
+    fn render_page(&mut self, window: &mut Window, cx: &mut Context<SettingsWindow>) -> AnyElement {
+        if self.sub_page_stack.is_empty()
+            && self.search_bar.read(cx).is_empty(cx)
+            && self
+                .pages
+                .get(self.current_page_index())
+                .is_some_and(|page| page.title == "Keymap")
+        {
+            if self.embedded_keymap.is_none() {
+                let workspace = self
+                    .original_window
+                    .and_then(|window| window.read(cx).ok())
+                    .map(|window| window.workspace().downgrade());
+                if let Some(workspace) = workspace {
+                    self.embedded_keymap =
+                        Some(cx.new(|cx| {
+                            keymap_editor::KeymapEditor::embedded(workspace, window, cx)
+                        }));
+                }
+            }
+            if let Some(keymap) = &self.embedded_keymap {
+                return div().size_full().child(keymap.clone()).into_any_element();
+            }
+        }
+        if self.sub_page_stack.is_empty()
+            && self
+                .pages
+                .get(self.current_page_index())
+                .is_some_and(|page| page.title == "Profile")
+        {
+            return pages::render_profile_page(self, window, cx);
+        }
+        if self.sub_page_stack.is_empty()
+            && matches!(self.current_file, SettingsUiFile::User)
+            && self.search_bar.read(cx).is_empty(cx)
+            && self
+                .pages
+                .get(self.current_page_index())
+                .is_some_and(|page| page.title == "AI")
+            && !self
+                .ai_page_state
+                .as_ref()
+                .is_some_and(|state| state.advanced)
+        {
+            return pages::render_ai_page(self, window, cx);
+        }
+
+        if let Some(sub_page) = self.sub_page_stack.last()
+            && sub_page.link.json_path == Some("model_connections")
+        {
+            return (sub_page.link.render)(self, &sub_page.scroll_handle, window, cx);
+        }
         let page_header;
         let page_content;
+        let card_layout =
+            self.sub_page_stack.is_empty() && matches!(self.current_file, SettingsUiFile::User);
 
         if let Some(current_sub_page) = self.sub_page_stack.last() {
             let is_skills_page =
@@ -3848,7 +4014,11 @@ impl SettingsWindow {
             page_content =
                 (active_page_render_fn)(self, &current_sub_page.scroll_handle, window, cx);
         } else {
-            page_header = self.render_files_header(window, cx).into_any_element();
+            page_header = if card_layout {
+                gpui::Empty.into_any_element()
+            } else {
+                self.render_files_header(window, cx).into_any_element()
+            };
 
             page_content = self
                 .render_current_page_items(window, cx)
@@ -4076,9 +4246,10 @@ impl SettingsWindow {
             .track_focus(&self.content_focus_handle.focus_handle(cx))
             .pt_6()
             .gap_4()
+            .when(card_layout, |this| this.pt(px(36.)).gap_0())
             .flex_1()
             .min_w_0()
-            .bg(cx.theme().colors().editor_background)
+            .bg(gpui::rgb(0x232530))
             .child(
                 v_flex()
                     .px_8()
@@ -4096,6 +4267,7 @@ impl SettingsWindow {
                     .tab_index(CONTENT_GROUP_TAB_INDEX)
                     .child(page_content),
             )
+            .into_any_element()
     }
 
     /// This function will create a new settings file if one doesn't exist
@@ -4378,6 +4550,10 @@ impl SettingsWindow {
         self.open_skill_creator_sub_page(open_mode, window, cx);
     }
 
+    pub fn add_custom_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        pages::open_custom_agent_form(self, None, window, cx);
+    }
+
     /// Navigate to a sub-page by its json_path.
     /// Returns true if the sub-page was found and pushed, false otherwise.
     pub fn navigate_to_sub_page(
@@ -4531,6 +4707,18 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = theme_settings::setup_ui_font(window, cx);
+        if let Some(title_bar) = &self.title_bar {
+            title_bar.update(cx, |title_bar, _| {
+                title_bar.set_children([div()
+                    .w_full()
+                    .text_center()
+                    .text_size(px(12.))
+                    .line_height(px(18.))
+                    .text_color(gpui::rgb(0xA6A8B8))
+                    .child("Zloppenheimer")
+                    .into_any_element()]);
+            });
+        }
 
         client_side_decorations(
             v_flex()
@@ -4610,7 +4798,10 @@ impl Render for SettingsWindow {
                         })
                         .child(self.render_nav(window, cx))
                         .child(self.render_page(window, cx)),
-                ),
+                )
+                .when(self.custom_agent_form.is_some(), |this| {
+                    this.child(pages::render_custom_agent_modal(self, window, cx))
+                }),
             window,
             cx,
         )
@@ -4917,6 +5108,85 @@ fn render_text_field<T: From<String> + Into<String> + AsRef<str> + Clone>(
             .map(|text| text.as_ref().to_string())
     };
 
+    if field.json_path == Some("projectless_task_folder") {
+        return h_flex()
+            .gap(px(12.))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .line_height(px(14.))
+                    .text_color(gpui::rgb(0xA1A4B8))
+                    .child(initial_text.unwrap_or_default()),
+            )
+            .child(
+                ButtonLike::new("change-projectless-task-folder")
+                    .height(px(30.).into())
+                    .corner_radius(px(6.))
+                    .background(gpui::rgb(0x343744).into())
+                    .tab_index(0_isize)
+                    .aria_label("Change projectless task folder")
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .child("Change"),
+                    )
+                    .on_click(move |_, window, cx| {
+                        let selected_paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+                            files: false,
+                            directories: true,
+                            multiple: false,
+                            prompt: Some("Choose task folder".into()),
+                        });
+                        let file = file.clone();
+                        window
+                            .spawn(cx, async move |cx| {
+                                let result = async {
+                                    if let Some(selected_paths) = selected_paths.await??
+                                        && let Some(folder) = selected_paths.into_iter().next()
+                                    {
+                                        let folder = folder
+                                            .to_str()
+                                            .context(
+                                                "The selected folder path must be valid UTF-8",
+                                            )?
+                                            .to_owned();
+                                        cx.update(|window, cx| {
+                                            update_settings_file(
+                                                file,
+                                                Some("projectless_task_folder"),
+                                                window,
+                                                cx,
+                                                move |settings, _| {
+                                                    settings.workspace.projectless_task_folder =
+                                                        Some(folder);
+                                                },
+                                            )
+                                        })??;
+                                    }
+                                    anyhow::Ok(())
+                                }
+                                .await;
+                                if let Err(error) = result {
+                                    let prompt = cx.update(|window, cx| {
+                                        window.prompt(
+                                            gpui::PromptLevel::Warning,
+                                            "Could not change task folder",
+                                            Some(&error.to_string()),
+                                            &["OK"],
+                                            cx,
+                                        )
+                                    })?;
+                                    prompt.await?;
+                                }
+                                anyhow::Ok(())
+                            })
+                            .detach_and_log_err(cx);
+                    }),
+            )
+            .into_any_element();
+    }
+
     // The JSON path uniquely identifies the setting this field edits, making
     // it a stable, collision-free element ID within the page.
     SettingsInputField::new(field.json_path.unwrap_or("settings-text-field"))
@@ -4959,6 +5229,300 @@ fn render_text_field<T: From<String> + Into<String> + AsRef<str> + Clone>(
         .into_any_element()
 }
 
+fn render_permission_preset(
+    field: SettingField<settings::ToolPermissionMode>,
+    file: SettingsUiFile,
+    _metadata: Option<&SettingsFieldMetadata>,
+    title: &'static str,
+    description: &'static str,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let settings = agent_settings::AgentSettings::get_global(cx);
+    let full_access = title == "Full access";
+    let selected = if full_access {
+        settings.tool_permissions.default == settings::ToolPermissionMode::Allow
+            && settings.sandbox_permissions.allow_unsandboxed
+    } else {
+        settings.tool_permissions.default == settings::ToolPermissionMode::Confirm
+            && !settings.sandbox_permissions.allow_unsandboxed
+            && !settings.sandbox_permissions.allow_all_hosts
+            && !settings.sandbox_permissions.allow_fs_write_all
+    };
+    Switch::new(
+        title,
+        if selected {
+            ToggleState::Selected
+        } else {
+            ToggleState::Unselected
+        },
+    )
+    .settings_style()
+    .tab_index(0_isize)
+    .aria_label(title)
+    .aria_description(description)
+    .on_click(move |state, window, cx| {
+        let full_access = (*state == ToggleState::Selected) == full_access;
+        update_settings_file(
+            file.clone(),
+            field.json_path,
+            window,
+            cx,
+            move |settings, _| {
+                settings
+                    .agent
+                    .get_or_insert_default()
+                    .set_full_access(full_access);
+            },
+        )
+        .log_err();
+    })
+    .into_any_element()
+}
+
+trait AppChoice: Copy + PartialEq + Default + 'static {
+    fn choices() -> &'static [(&'static str, Self)];
+}
+
+impl AppChoice for settings::AppLanguage {
+    fn choices() -> &'static [(&'static str, Self)] {
+        &[
+            ("Auto detect", Self::Auto),
+            ("English", Self::English),
+            ("Français", Self::French),
+            ("Deutsch", Self::German),
+            ("Español", Self::Spanish),
+        ]
+    }
+}
+
+impl AppChoice for settings::FileOpenDestination {
+    fn choices() -> &'static [(&'static str, Self)] {
+        &[
+            ("In app", Self::Internal),
+            ("Default application", Self::System),
+        ]
+    }
+}
+
+fn render_app_choice<T: AppChoice + Send>(
+    field: SettingField<T>,
+    file: SettingsUiFile,
+    _metadata: Option<&SettingsFieldMetadata>,
+    title: &'static str,
+    _description: &'static str,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let (value, disabled) = get_current_value(&SettingsStore::global(cx), &file, &field, cx)
+        .map(|value| (*value.value, value.disabled))
+        .unwrap_or_default();
+    let label = T::choices()
+        .iter()
+        .find(|(_, choice)| *choice == value)
+        .map(|(label, _)| *label)
+        .unwrap_or_default();
+    PopoverMenu::new(title)
+        .trigger(
+            ButtonLike::new(title)
+                .size(ButtonSize::None)
+                .height(px(30.).into())
+                .corner_radius(px(7.))
+                .background(gpui::rgb(0x2C2F3B).into())
+                .disabled(disabled)
+                .aria_label(title)
+                .custom_style(|this| {
+                    this.px(px(11.))
+                        .border_1()
+                        .border_color(gpui::rgb(0x454856))
+                })
+                .child(
+                    h_flex()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .text_color(gpui::rgb(0xD3D1DF))
+                                .child(ui::localized(label, cx)),
+                        )
+                        .child(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::Custom(rems_from_px(13_f32))),
+                        ),
+                ),
+        )
+        .anchor(gpui::Anchor::TopRight)
+        .menu(move |window, cx| {
+            let file = file.clone();
+            Some(ContextMenu::build(window, cx, move |menu, _, cx| {
+                T::choices()
+                    .iter()
+                    .fold(menu.dropdown_style(px(220.)), |menu, (label, choice)| {
+                        let file = file.clone();
+                        let choice = *choice;
+                        menu.entry(ui::localized(label, cx), None, move |window, cx| {
+                            update_settings_file(
+                                file.clone(),
+                                field.json_path,
+                                window,
+                                cx,
+                                move |settings, cx| (field.write)(settings, Some(choice), cx),
+                            )
+                            .log_err();
+                        })
+                    })
+            }))
+        })
+        .into_any_element()
+}
+
+fn render_model_speed(
+    field: SettingField<language_model::Speed>,
+    file: SettingsUiFile,
+    _metadata: Option<&SettingsFieldMetadata>,
+    title: &'static str,
+    _description: &'static str,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let value = get_current_value(&SettingsStore::global(cx), &file, &field, cx)
+        .map(|value| *value.value)
+        .unwrap_or_default();
+    let supports_fast = language_model::LanguageModelRegistry::read_global(cx)
+        .default_model()
+        .is_some_and(|model| model.model.supports_fast_mode());
+    PopoverMenu::new("default-speed-menu")
+        .trigger(
+            ButtonLike::new("default-speed")
+                .size(ButtonSize::None)
+                .height(px(30.).into())
+                .corner_radius(px(7.))
+                .background(gpui::rgb(0x2C2F3B).into())
+                .custom_style(|this| {
+                    this.px(px(11.))
+                        .border_1()
+                        .border_color(gpui::rgb(0x454856))
+                })
+                .aria_label(title)
+                .disabled(!supports_fast)
+                .child(
+                    h_flex()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .text_color(gpui::rgb(0xD3D1DF))
+                                .child(if value == language_model::Speed::Fast {
+                                    "Fast"
+                                } else {
+                                    "Standard"
+                                }),
+                        )
+                        .child(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::Custom(rems_from_px(13_f32))),
+                        ),
+                ),
+        )
+        .anchor(gpui::Anchor::TopRight)
+        .menu(move |window, cx| {
+            let file = file.clone();
+            Some(ContextMenu::build(window, cx, move |menu, _, cx| {
+                [
+                    ("Standard", language_model::Speed::Standard),
+                    ("Fast", language_model::Speed::Fast),
+                ]
+                .into_iter()
+                .fold(menu.dropdown_style(px(180.)), |menu, (label, speed)| {
+                    let file = file.clone();
+                    menu.entry(ui::localized(label, cx), None, move |window, cx| {
+                        update_settings_file(
+                            file.clone(),
+                            field.json_path,
+                            window,
+                            cx,
+                            move |settings, cx| (field.write)(settings, Some(speed), cx),
+                        )
+                        .log_err();
+                    })
+                })
+            }))
+        })
+        .into_any_element()
+}
+
+fn render_terminal_location(
+    field: SettingField<settings::TerminalDockPosition>,
+    file: SettingsUiFile,
+    metadata: Option<&SettingsFieldMetadata>,
+    title: &'static str,
+    description: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    if title != "Default terminal location" {
+        return render_dropdown(field, file, metadata, title, description, window, cx);
+    }
+    let (value, disabled) = get_current_value(&SettingsStore::global(cx), &file, &field, cx)
+        .map(|value| (*value.value, value.disabled))
+        .unwrap_or((settings::TerminalDockPosition::Bottom, false));
+    h_flex()
+        .gap(px(4.))
+        .p(px(3.))
+        .rounded(px(7.))
+        .bg(gpui::rgb(0x22242E))
+        .children(
+            [
+                ("Bottom", settings::TerminalDockPosition::Bottom),
+                ("Right", settings::TerminalDockPosition::Right),
+            ]
+            .into_iter()
+            .map(|(label, location)| {
+                let file = file.clone();
+                ButtonLike::new(label)
+                    .toggle_state(value == location)
+                    .disabled(disabled)
+                    .size(ButtonSize::None)
+                    .height(px(26.).into())
+                    .corner_radius(px(5.))
+                    .tab_index(0_isize)
+                    .aria_label(format!("{title}: {label}"))
+                    .background(if value == location {
+                        gpui::rgb(0x3A3548).into()
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .child(
+                        div()
+                            .px(px(11.))
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(gpui::rgb(if value == location {
+                                0xE0D4EF
+                            } else {
+                                0xA1A4B8
+                            }))
+                            .child(ui::localized(label, cx)),
+                    )
+                    .on_click(move |_, window, cx| {
+                        update_settings_file(
+                            file.clone(),
+                            field.json_path,
+                            window,
+                            cx,
+                            move |settings, cx| {
+                                (field.write)(settings, Some(location), cx);
+                            },
+                        )
+                        .log_err();
+                    })
+            }),
+        )
+        .into_any_element()
+}
+
 fn render_toggle_button<B: Into<bool> + From<bool> + Copy>(
     field: SettingField<B>,
     file: SettingsUiFile,
@@ -4980,6 +5544,7 @@ fn render_toggle_button<B: Into<bool> + From<bool> + Copy>(
     };
 
     Switch::new("toggle_button", toggle_state)
+        .settings_style()
         .tab_index(0_isize)
         .aria_label(title)
         .when(!description.is_empty(), |this| {
@@ -5340,6 +5905,10 @@ pub mod test {
                 has_query: false,
                 content_handles: Vec::default(),
                 search_task: None,
+                ai_page_state: None,
+                selected_connection: None,
+                profile_page_state: None,
+                embedded_keymap: None,
                 sub_page_stack: Vec::default(),
                 opening_link: false,
                 focus_handle: cx.focus_handle(),
@@ -5481,6 +6050,10 @@ pub mod test {
             has_query: false,
             content_handles: vec![],
             search_task: None,
+            ai_page_state: None,
+            selected_connection: None,
+            profile_page_state: None,
+            embedded_keymap: None,
             focus_handle: cx.focus_handle(),
             navbar_focus_handle: NonFocusableHandle::new(
                 NAVBAR_CONTAINER_TAB_INDEX,

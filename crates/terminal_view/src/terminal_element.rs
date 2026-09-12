@@ -1289,7 +1289,11 @@ impl Element for TerminalElement {
                         .advance(font_id, font_pixels, 'm')
                         .unwrap()
                         .width;
-                    gutter = cell_width;
+                    gutter = if matches!(self.mode, TerminalMode::Standalone) {
+                        px(0.)
+                    } else {
+                        cell_width
+                    };
 
                     let mut size = bounds.size;
                     size.width -= gutter;

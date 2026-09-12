@@ -1406,6 +1406,9 @@ impl Render for TerminalView {
                 div()
                     .id("terminal-view-container")
                     .size_full()
+                    .when(matches!(self.mode, TerminalMode::Standalone), |this| {
+                        this.px(px(24.)).pt(px(8.)).pb(px(12.))
+                    })
                     .bg(cx.theme().colors().editor_background)
                     .child(TerminalElement::new(
                         terminal_handle,
@@ -1504,7 +1507,7 @@ impl Item for TerminalView {
 
         let self_handle = self.self_handle.clone();
         h_flex()
-            .gap_1()
+            .gap(px(8.))
             .group("term-tab-icon")
             .when(!params.selected, |this| {
                 this.track_focus(&self.focus_handle)
@@ -1538,6 +1541,7 @@ impl Item for TerminalView {
                     .relative()
                     .child(
                         Label::new(title)
+                            .size(LabelSize::Custom(rems(16. / 16.)))
                             .single_line()
                             .color(params.text_color())
                             .when(self.is_renaming(), |this| this.alpha(0.)),

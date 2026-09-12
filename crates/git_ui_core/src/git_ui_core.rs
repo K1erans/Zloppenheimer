@@ -54,6 +54,7 @@ impl Render for GitPickerPopover {
 type BranchPickerBuilder = dyn Fn(
     WeakEntity<Workspace>,
     Option<Entity<Repository>>,
+    bool,
     &mut Window,
     &mut App,
 ) -> Entity<GitPickerPopover>;
@@ -66,6 +67,7 @@ pub fn set_branch_picker_builder(
     builder: impl Fn(
         WeakEntity<Workspace>,
         Option<Entity<Repository>>,
+        bool,
         &mut Window,
         &mut App,
     ) -> Entity<GitPickerPopover>
@@ -82,7 +84,17 @@ pub fn build_branch_picker(
     cx: &mut App,
 ) -> Option<Entity<GitPickerPopover>> {
     let builder = cx.try_global::<BranchPickerBuilderGlobal>()?.0.clone();
-    Some(builder(workspace, repository, window, cx))
+    Some(builder(workspace, repository, false, window, cx))
+}
+
+pub fn build_composer_branch_picker(
+    workspace: WeakEntity<Workspace>,
+    repository: Option<Entity<Repository>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Entity<GitPickerPopover>> {
+    let builder = cx.try_global::<BranchPickerBuilderGlobal>()?.0.clone();
+    Some(builder(workspace, repository, true, window, cx))
 }
 
 type FileHistoryOpener = dyn Fn(&mut Workspace, &ProjectPath, &mut Window, &mut Context<Workspace>);

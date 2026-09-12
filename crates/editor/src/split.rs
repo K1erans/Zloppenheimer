@@ -418,11 +418,20 @@ pub struct ToggleSplitDiff;
 #[derive(gpui::IntoElement)]
 pub struct DiffStyleControls {
     splittable_editor: Entity<SplittableEditor>,
+    labeled: bool,
 }
 
 impl DiffStyleControls {
     pub fn new(splittable_editor: Entity<SplittableEditor>) -> Self {
-        Self { splittable_editor }
+        Self {
+            splittable_editor,
+            labeled: false,
+        }
+    }
+
+    pub fn labeled(mut self) -> Self {
+        self.labeled = true;
+        self
     }
 
     fn set_diff_view_style(
@@ -456,6 +465,69 @@ impl RenderOnce for DiffStyleControls {
         } else {
             IconName::DiffSplit
         };
+
+        if self.labeled {
+            return h_flex()
+                .h(px(28.))
+                .p(px(2.))
+                .gap(px(2.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(gpui::rgb(0x4B4E5D))
+                .bg(gpui::rgb(0x20232D))
+                .children(
+                    [
+                        (DiffViewStyle::Unified, IconName::DiffUnified, "Unified"),
+                        (DiffViewStyle::Split, split_icon, "Side by side"),
+                    ]
+                    .into_iter()
+                    .map(|(style, icon, label)| {
+                        let selected = diff_view_style == style;
+                        let splittable_editor = self.splittable_editor.clone();
+                        ui::ButtonLike::new(label)
+                            .size(ButtonSize::None)
+                            .height(px(22.).into())
+                            .corner_radius(px(4.))
+                            .custom_style(|this| this.px(px(7.)).gap(px(5.)))
+                            .background(if selected {
+                                gpui::rgb(0x494052).into()
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .toggle_state(selected)
+                            .child(
+                                Icon::new(icon)
+                                    .size(IconSize::Custom(rems(14. / 16.)))
+                                    .color(Color::Custom(
+                                        gpui::rgb(if selected { 0xE0D0ED } else { 0xABB2C6 })
+                                            .into(),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .line_height(px(16.))
+                                    .text_color(gpui::rgb(if selected {
+                                        0xEADFF2
+                                    } else {
+                                        0xB5BBCD
+                                    }))
+                                    .child(label),
+                            )
+                            .tooltip(Tooltip::text(
+                                if style == DiffViewStyle::Split && is_split_pending {
+                                    format!("Side by side requires at least {min_columns} columns")
+                                } else {
+                                    label.to_owned()
+                                },
+                            ))
+                            .on_click(move |_, window, cx| {
+                                Self::set_diff_view_style(&splittable_editor, style, window, cx)
+                            })
+                    }),
+                )
+                .into_any_element();
+        }
 
         h_flex()
             .gap_1()
@@ -528,6 +600,7 @@ impl RenderOnce for DiffStyleControls {
                         }
                     }),
             )
+            .into_any_element()
     }
 }
 
@@ -543,6 +616,7 @@ pub struct SplittableEditor {
     /// True when the current width is below the minimum threshold for split
     /// mode, regardless of the current diff view style setting.
     too_narrow_for_split: bool,
+    review_style: bool,
     last_width: Option<Pixels>,
     _subscriptions: Vec<Subscription>,
 }
@@ -555,6 +629,10 @@ struct LhsEditor {
 }
 
 impl SplittableEditor {
+    pub fn set_review_style(&mut self, enabled: bool) {
+        self.review_style = enabled;
+    }
+
     pub fn rhs_editor(&self) -> &Entity<Editor> {
         &self.rhs_editor
     }
@@ -698,6 +776,7 @@ impl SplittableEditor {
             split_state,
             searched_side: None,
             too_narrow_for_split: false,
+            review_style: false,
             last_width: None,
             _subscriptions: subscriptions,
         }
@@ -2270,9 +2349,31 @@ impl Render for SplittableEditor {
         cx: &mut ui::Context<Self>,
     ) -> impl ui::IntoElement {
         let is_split = self.lhs.is_some();
+        if self.review_style {
+            let dimensions = Some(crate::GutterDimensions {
+                left_padding: px(if is_split { 12. } else { 78. }),
+                right_padding: px(if is_split { 28. } else { 36. }),
+                width: px(if is_split { 70. } else { 144. }),
+                margin: px(0.),
+                git_blame_entries_width: None,
+            });
+            self.update_editors(cx, |editor, _| {
+                editor.set_gutter_dimensions_override(dimensions)
+            });
+        }
+        let mut style = self.rhs_editor.read(cx).create_style(cx);
+        if self.review_style {
+            style.text.font_size = px(if is_split { 12. } else { 13. }).into();
+            style.text.line_height = px(if is_split { 28. } else { 30. }).into();
+        }
         let inner = if is_split {
-            let style = self.rhs_editor.read(cx).create_style(cx);
-            SplitEditorView::new(cx.entity(), style, self.split_state.clone()).into_any_element()
+            SplitEditorView::new(cx.entity(), style, self.split_state.clone())
+                .review_gutter(self.review_style)
+                .into_any_element()
+        } else if self.review_style {
+            crate::EditorElement::new(&self.rhs_editor, style)
+                .review_gutter(true)
+                .into_any_element()
         } else {
             self.rhs_editor.clone().into_any_element()
         };
